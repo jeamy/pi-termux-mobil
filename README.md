@@ -294,6 +294,8 @@ Lots of bugfixes around durable sessions, security and the Android service.
   `~/.pi-mobile/remotes.json`.
 - Shared `runtime/common.mjs` for both servers; `PI_TEST_FAUX=1` provides a
   scripted offline model for tests.
+- `start_server.sh` now actually passes `PI_WORKDIR` to pi-serverd (it was set
+  as an unexported shell variable).
 
 ---
 
