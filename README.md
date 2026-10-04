@@ -297,6 +297,28 @@ Lots of bugfixes around durable sessions, security and the Android service.
 - `start_server.sh` now actually passes `PI_WORKDIR` to pi-serverd (it was set
   as an unexported shell variable).
 
+## Device test report (0.0.1)
+
+Tested on 2026-10-04, upgrading an installed 0.1.0 build (runtime 42) in place. Remote host: Fedora with OpenSSH, reached over Wi-Fi with the phone's Termux OpenSSH.
+
+| Test | Result |
+|---|---|
+| Upgrade runtime 42 → 43 | ✅ toybox `tar` reads from stdin, done in ~13 s; `usr/` and `runtime/` replaced, credentials and sessions kept |
+| Legacy `sessions.json` | ✅ imported into the durable registry; "Main" and the active session kept |
+| `GET /vendor`, foreign `Host`, missing token | ✅ bridge keeps running / 421 / 401 |
+| Model choice + real prompt | ✅ `claude-haiku-4-5` stays selected after the prompt, answer "pong" |
+| Same `requestId` sent twice | ✅ one submission |
+| Activity recreated 3× (`onCreate`) | ✅ node keeps the same PID, no bridge restart |
+| Agent kills its own bridge during a bash call | ✅ supervisor restarts node after ~1 s, `resume()` continues the run, bash returns `interrupted`, the model answers |
+| WebView UI | ✅ loads over `127.0.0.1` with the network security config; tool line, usage and menu work |
+| Remote over Termux OpenSSH | ✅ tunnel socket `0600` in a `0700` directory, host key fingerprint matches the host, daemon socket `0600` |
+| Phone's sshd session killed | ✅ status `reconnecting`, reconnected after ~2 s, retried prompt runs exactly once |
+| Remote page in the app | ✅ host selected, session attached with full history, model and usage shown |
+
+Not tested on the device: the service's own `SIGTERM` stop path
+(`onDestroy`), which cannot be triggered from outside for a non-exported
+service.
+
 ---
 
 *vibe coding fun with pi* — [Earendil Pi on GitHub](https://github.com/earendil-works/pi)
