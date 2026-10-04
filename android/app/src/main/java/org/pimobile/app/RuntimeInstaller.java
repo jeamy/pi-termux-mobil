@@ -3,6 +3,7 @@ package org.pimobile.app;
 import android.content.Context;
 import android.content.res.AssetManager;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -12,11 +13,15 @@ import java.io.OutputStream;
 /**
  * Extracts the bundled runtime (Termux binaries + pi runtime) from assets
  * into the app's private files directory using the system toybox tar.
+ *
+ * Archives are streamed into tar's stdin (no temporary copy of ~170 MB).
+ * usr/ and runtime/ are replaced as a whole on upgrade, so files removed from
+ * a newer bundle do not linger; home/ and work/ (user data) are never touched.
  */
 final class RuntimeInstaller {
 
     static final String STAMP_NAME = ".runtime-version";
-    static final int RUNTIME_VERSION = 42;
+    static final int RUNTIME_VERSION = 43;
 
     private RuntimeInstaller() {}
 
@@ -43,44 +48,58 @@ final class RuntimeInstaller {
         File files = ctx.getFilesDir();
         AssetManager am = ctx.getAssets();
 
-        File tmp = new File(ctx.getCacheDir(), "extract");
-        tmp.mkdirs();
+        // invalidate first: an interrupted install must not look complete
+        new File(files, STAMP_NAME).delete();
+        removeTree(new File(files, "usr"));
+        removeTree(new File(files, "runtime"));
 
-        extractTarAsset(am, tmp, files, "rootfs.bin");
-        extractTarAsset(am, tmp, files, "runtime.bin");
+        extractTarAsset(am, files, "rootfs.bin");
+        extractTarAsset(am, files, "runtime.bin");
 
         new File(files, "tmp").mkdirs();
         new File(files, "home").mkdirs();
         new File(files, "work").mkdirs();
 
-        try (OutputStream out = new FileOutputStream(new File(files, STAMP_NAME))) {
+        File stamp = new File(files, STAMP_NAME);
+        File tmpStamp = new File(files, STAMP_NAME + ".tmp");
+        try (FileOutputStream out = new FileOutputStream(tmpStamp)) {
             out.write(String.valueOf(RUNTIME_VERSION).getBytes("UTF-8"));
+            out.getFD().sync();
         }
-        deleteRecursive(tmp);
+        if (!tmpStamp.renameTo(stamp)) throw new IOException("could not write " + stamp);
+        removeTree(new File(ctx.getCacheDir(), "extract")); // leftovers of older versions
     }
 
-    private static void extractTarAsset(AssetManager am, File tmp, File dest, String name)
+    private static void extractTarAsset(AssetManager am, File dest, String name)
             throws IOException, InterruptedException {
-        File tar = new File(tmp, name);
-        try (InputStream in = am.open(name); OutputStream out = new FileOutputStream(tar)) {
+        Process p = new ProcessBuilder("/system/bin/tar", "-xzf", "-", "-C", dest.getAbsolutePath())
+                .redirectErrorStream(true).start();
+        // drain tar's output concurrently so it can never block on a full pipe
+        ByteArrayOutputStream log = new ByteArrayOutputStream();
+        Thread drain = new Thread(() -> {
+            byte[] b = new byte[8192];
+            try (InputStream in = p.getInputStream()) {
+                int n;
+                while ((n = in.read(b)) >= 0) if (log.size() < 16_000) log.write(b, 0, n);
+            } catch (IOException ignored) { }
+        }, "tar-log");
+        drain.start();
+        try (InputStream in = am.open(name); OutputStream out = p.getOutputStream()) {
             byte[] buf = new byte[256 * 1024];
             int n;
             while ((n = in.read(buf)) >= 0) out.write(buf, 0, n);
         }
-        Process p = new ProcessBuilder("/system/bin/tar", "-xzf", tar.getAbsolutePath(), "-C",
-                dest.getAbsolutePath()).redirectErrorStream(true).start();
         int code = p.waitFor();
+        drain.join(2000);
         if (code != 0) {
-            byte[] err = new byte[Math.min(p.getInputStream().available(), 4000)];
-            p.getInputStream().read(err);
-            android.util.Log.w("PiService", "tar exited " + code + " for " + name + ": " + new String(err));
+            String err = log.toString("UTF-8");
+            android.util.Log.w("PiService", "tar exited " + code + " for " + name + ": " + err);
             // toybox tar exits non-zero on dangling symlinks (harmless) — only
             // treat it as failure when expected files are missing
             if (!expectedFilesPresent(dest, name)) {
-                throw new IOException("tar failed (" + code + ") for " + name + ": " + new String(err));
+                throw new IOException("tar failed (" + code + ") for " + name + ": " + err);
             }
         }
-        tar.delete();
     }
 
     private static boolean expectedFilesPresent(File dest, String name) {
@@ -89,9 +108,20 @@ final class RuntimeInstaller {
         return true;
     }
 
-    private static void deleteRecursive(File f) {
-        File[] kids = f.listFiles();
-        if (kids != null) for (File k : kids) deleteRecursive(k);
-        f.delete();
+    /** rm -rf without following symlinks (the rootfs contains links into lib/). */
+    private static void removeTree(File f) throws IOException, InterruptedException {
+        if (!f.exists() && !isSymlink(f)) return;
+        Process p = new ProcessBuilder("/system/bin/rm", "-rf", f.getAbsolutePath())
+                .redirectErrorStream(true).start();
+        p.getInputStream().close();
+        if (p.waitFor() != 0 && f.exists()) throw new IOException("could not remove " + f);
+    }
+
+    private static boolean isSymlink(File f) {
+        try {
+            return !f.getCanonicalPath().equals(f.getAbsolutePath());
+        } catch (IOException e) {
+            return false;
+        }
     }
 }

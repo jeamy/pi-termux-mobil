@@ -18,10 +18,14 @@
     <button id="btn-connect">connect</button>
     <button id="btn-new-session" class="hidden" title="New session">+</button>
     <button id="btn-delete-session" class="hidden" title="Remove session">✕</button>
+    <button id="btn-abort" class="hidden" title="Abort running work">■</button>
+    <button id="btn-compact" class="hidden" title="Compact context">⇊</button>
   </div>
+  <div id="session-bar" class="hidden"><span id="remote-status"></span> <span id="session-usage"></span></div>
   <main id="chat"></main>
   <form id="composer" class="hidden">
     <textarea id="input" rows="2" placeholder="Prompt…" autocomplete="off"></textarea>
+    <label id="steer-wrap" class="hidden" title="Steer the running work instead of queueing a follow-up"><input type="checkbox" id="steer"> steer</label>
     <button type="submit">➤</button>
   </form>
   <script type="module" src="remote.js"></script>

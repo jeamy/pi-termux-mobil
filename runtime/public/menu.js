@@ -7,6 +7,13 @@ export function renderMenu() {
   const token = new URLSearchParams(location.search).get('token')
     || localStorage.getItem('pi-token') || '';
   if (token) localStorage.setItem('pi-token', token);
+  // keep the token out of the visible URL and the WebView history
+  const params = new URLSearchParams(location.search);
+  if (params.has('token')) {
+    params.delete('token');
+    const rest = params.toString();
+    history.replaceState(null, '', `${location.pathname}${rest ? `?${rest}` : ''}${location.hash}`);
+  }
   const q = (p) => `${p}?token=${encodeURIComponent(token)}`;
 
   const bar = document.getElementById('menubar');
@@ -34,6 +41,7 @@ export function renderMenu() {
     <a href="${q('/terminal.html')}" data-pg="term">pi CLI</a>
     <a href="#" id="menu-ssh">pi CLI (ssh)</a>
     <a href="#" id="menu-abort">Abort</a>
+    <a href="#" id="menu-compact">Compact context</a>
     <a href="#" id="menu-new">New session</a>`;
   bar.append(btn, menu);
 
@@ -55,6 +63,10 @@ export function renderMenu() {
   menu.querySelector('#menu-abort').addEventListener('click', (e) => {
     e.preventDefault();
     fetch(API.abort, { method: 'POST', headers: { 'x-token': token } });
+  });
+  menu.querySelector('#menu-compact').addEventListener('click', (e) => {
+    e.preventDefault();
+    fetch(API.compact, { method: 'POST', headers: { 'x-token': token } });
   });
   menu.querySelector('#menu-new').addEventListener('click', async (e) => {
     e.preventDefault();

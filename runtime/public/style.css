@@ -1,4 +1,5 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
+.hidden { display: none !important; }
 html, body { height: 100%; }
 body {
   display: flex; flex-direction: column;
@@ -223,3 +224,15 @@ body.term-page #term { bottom: 44px; }
   padding: 10px;
   font-size: 15px;
 }
+
+/* durable transcript states */
+.msg.user.pending { opacity: .6; }
+.msg.user.failed { background: #5a2330; }
+.msg.assistant.live { border: 1px dashed #3a3a48; }
+.msg.tool { cursor: pointer; }
+.msg.tool.error { color: #ff9a9a; }
+.tool-out { margin-top: 6px; max-height: 40vh; overflow: auto; white-space: pre-wrap; color: #b8b8c4; font-size: 11px; }
+.tool-out.hidden { display: none; }
+#steer-wrap { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #9a9aa5; }
+#steer-wrap.hidden, #session-bar.hidden { display: none; }
+#session-usage { float: right; color: #777; }

@@ -13,6 +13,8 @@ import java.io.FileInputStream;
 public final class MainActivity extends Activity {
 
     private WebView webView;
+    // one waiter at a time; page errors while the bridge restarts must not pile up threads
+    private final java.util.concurrent.atomic.AtomicBoolean waiting = new java.util.concurrent.atomic.AtomicBoolean();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -43,7 +45,7 @@ public final class MainActivity extends Activity {
                                         android.webkit.WebResourceError error) {
                 if (request.isForMainFrame()) {
                     // bridge may be restarting on a new port — poll again
-                    new Thread(MainActivity.this::waitForBridge, "pi-bridge-wait2").start();
+                    startWaiting();
                 }
             }
         });
@@ -55,15 +57,24 @@ public final class MainActivity extends Activity {
             startService(new Intent(this, PiService.class));
         }
 
-        new Thread(this::waitForBridge, "pi-bridge-wait").start();
+        startWaiting();
+    }
+
+    private void startWaiting() {
+        if (waiting.compareAndSet(false, true)) new Thread(this::waitForBridge, "pi-bridge-wait").start();
     }
 
     private void waitForBridge() {
+        try { waitForBridgeOnce(); } finally { waiting.set(false); }
+    }
+
+    private void waitForBridgeOnce() {
         // server.mjs writes under $HOME/.pi-mobile (HOME == files/home)
         File stateDir = new File(new File(getFilesDir(), "home"), ".pi-mobile");
         File portFile = new File(stateDir, "port");
         File tokenFile = new File(stateDir, "token");
-        for (int i = 0; i < 120; i++) {
+        // first launch extracts ~170 MB before node starts: allow several minutes
+        for (int i = 0; i < 600; i++) {
             try {
                 if (portFile.isFile() && tokenFile.isFile()) {
                     String port = readAll(portFile).trim();

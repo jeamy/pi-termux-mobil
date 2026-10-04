@@ -1,5 +1,6 @@
 import { API } from './constants.js';
 import { renderMenu } from './menu.js';
+import { newRequestId, postJson, Transcript, usageText } from './transcript.js';
 
 const token = renderMenu();
 
@@ -7,146 +8,68 @@ const chat = document.getElementById('chat');
 const input = document.getElementById('input');
 const statusEl = document.getElementById('status');
 const sessionNameEl = document.getElementById('session-name');
+const usageEl = document.getElementById('session-usage');
+const steerWrap = document.getElementById('steer-wrap');
+const steerBox = document.getElementById('steer');
+const modelSelect = document.getElementById('model-select');
 
-let currentAssistant = null;
-
-function el(cls, text) {
-  const d = document.createElement('div');
-  d.className = cls;
-  if (text !== undefined) d.textContent = text;
-  chat.appendChild(d);
-  chat.scrollTop = chat.scrollHeight;
-  return d;
-}
-
-function addUser(text) { currentAssistant = null; el('msg user', text); }
-function addAssistant() {
-  if (!currentAssistant) currentAssistant = el('msg assistant', '');
-  return currentAssistant;
-}
-function addTool(name, args) {
-  currentAssistant = null;
-  const brief = args ? (args.command || args.path || args.pattern || JSON.stringify(args).slice(0, 80)) : '';
-  el('msg tool', `⚙ ${name}${brief ? '  ' + brief : ''}`);
-}
-function addSys(text) { currentAssistant = null; el('msg sys', text); }
-
-function renderHistory(entries) {
-  chat.innerHTML = '';
-  for (const e of entries) {
-    for (const m of e.model ?? []) {
-      if (m.role === 'user' && typeof m.content === 'string') el('msg user', m.content);
-      else if (m.role === 'assistant' && Array.isArray(m.content)) {
-        const text = m.content.filter((c) => c?.type === 'text').map((c) => c.text).join('\n');
-        if (text) el('msg assistant', text);
-      } else if (m.role === 'toolResult') {
-        el('msg tool', `⚙ ${m.toolName || 'tool'}`);
-      }
-    }
-  }
-  chat.scrollTop = chat.scrollHeight;
-}
-
-function handleEvent(ev) {
-  switch (ev.type) {
-    case 'message_end': {
-      // durable watchEvents: entry.model[] holds the committed message
-      const msgs = ev.entry?.model ?? (ev.entry ? [ev.entry] : []);
-      for (const m of msgs) {
-        if (m.role === 'assistant' && Array.isArray(m.content)) {
-          const text = m.content.filter((c) => c?.type === 'text').map((c) => c.text).join('\n');
-          if (text) el('msg assistant', text);
-        }
-      }
-      currentAssistant = null;
-      break;
-    }
-    case 'message_update': {
-      const a = ev.assistantMessageEvent;
-      if (a?.type === 'text_delta' && a.delta) {
-        const b = addAssistant();
-        b.textContent += a.delta;
-        chat.scrollTop = chat.scrollHeight;
-      }
-      break;
-    }
-    case 'run_end': currentAssistant = null; status('idle'); break;
-    case 'turn_start': status('running…'); break;
-    case 'tool_execution_start': addTool(ev.toolName || ev.tool || ev.name || 'tool', ev.args); break;
-    case 'tool_execution_end': {
-      if (ev.isError || ev.error) addSys(`tool error: ${ev.error || 'failed'}`);
-      break;
-    }
-    case 'turn_end': currentAssistant = null; break;
-    case 'agent_end': currentAssistant = null; status('idle'); break;
-    case 'agent_settled': status('idle'); break;
-    case 'compaction_start': addSys('compacting…'); break;
-    case 'auto_retry_start': addSys(`retry ${ev.attempt}/${ev.maxAttempts}: ${ev.errorMessage || ''}`); break;
-    case 'bash_execution_update': {
-      if (ev.delta) {
-        const b = addAssistant();
-        b.textContent += ev.delta;
-        chat.scrollTop = chat.scrollHeight;
-      }
-      break;
-    }
-    
-    case 'bridge_snapshot': {
-      const m = ev.snapshot?.agent?.model;
-      currentModel = m || null;
-      syncModelSelect();
-      renderHistory(ev.snapshot?.entries ?? []);
-      status('idle');
-      break;
-    }
-    case 'agent': {
-      const m = ev.agent?.model;
-      if (m) { currentModel = m; syncModelSelect(); }
-      break;
-    }
-    case 'bridge_error': addSys(`error: ${ev.error}`); break;
-    case 'error': addSys(`error: ${ev.error?.message || ev.error || 'unknown'}`); break;
-    default: break;
-  }
-}
+let busy = false;
+let queued = 0;
+let currentModel = null;
 
 function status(t) { statusEl.textContent = t; }
+function showBusy() {
+  status(busy ? `running…${queued ? ` (${queued} queued)` : ''}` : 'idle');
+  steerWrap.classList.toggle('hidden', !busy);
+}
+
+const transcript = new Transcript(chat, {
+  onBusy: (b) => { busy = b; showBusy(); },
+  onModel: (m) => { currentModel = m; syncModelSelect(); },
+  onUsage: (u) => { usageEl.textContent = usageText(u); },
+  onInbox: (items) => { queued = items.length; showBusy(); },
+});
+
+// --- events: every (re)connect gets a fresh snapshot of the current state ----
 
 function connect() {
   const es = new EventSource(`${API.events}?token=${encodeURIComponent(token)}`);
-  es.onmessage = (e) => { try { handleEvent(JSON.parse(e.data)); } catch {} };
+  es.onmessage = (e) => {
+    let ev;
+    try { ev = JSON.parse(e.data); } catch { return; }
+    if (ev.type === 'bridge_snapshot') {
+      sessionNameEl.textContent = ev.sessionName || 'Main';
+      transcript.renderSnapshot(ev.snapshot);
+    } else if (ev.type === 'bridge_error') {
+      transcript.sys(`error: ${ev.error}`);
+    } else if (ev.type !== 'bridge_connected') {
+      transcript.handleEvent(ev);
+    }
+  };
   es.onerror = () => status('reconnecting…');
 }
 
-async function post(endpoint, body = {}) {
-  const r = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-token': token },
-    body: JSON.stringify(body),
-  });
-  return r.json();
-}
+// --- composer: requestId makes a retried prompt exactly-once ------------------
 
 document.getElementById('composer').addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = input.value.trim();
   if (!text) return;
   input.value = '';
-  addUser(text);
-  status('running…');
-  const r = await post(API.prompt, { message: text });
-  if (r.error) addSys(`error: ${r.error}`);
+  const pending = transcript.addPendingUser(text);
+  const body = { message: text, requestId: newRequestId() };
+  if (busy && steerBox.checked) body.whenBusy = 'steer';
+  const r = await postJson(API.prompt, token, body, { retries: 3 });
+  if (r.error) transcript.failPending(pending, r.error);
 });
-
-// header menu is rendered by menu.js (brand -> home, ≡ dropdown)
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) document.getElementById('composer').requestSubmit();
+});
 
 // --- model picker ------------------------------------------------------------
 
-const modelSelect = document.getElementById('model-select');
-let currentModel = null;
-
 function syncModelSelect() {
-  if (!currentModel) return;
+  if (!currentModel) { modelSelect.value = ''; return; }
   const v = `${currentModel.provider}|${currentModel.modelId}`;
   if (![...modelSelect.options].some((o) => o.value === v)) {
     const o = document.createElement('option');
@@ -175,16 +98,9 @@ async function refreshModels() {
 modelSelect.addEventListener('change', async () => {
   const [provider, modelId] = modelSelect.value.split('|');
   if (!modelId) return;
-  const r = await post(API.model, { provider, modelId });
-  addSys(r.ok ? `model → ${provider}/${modelId}` : `error: ${r.error}`);
+  const r = await postJson(API.model, token, { provider, modelId });
+  if (!r.ok) transcript.sys(`error: ${r.error}`);
 });
 
 connect();
 refreshModels();
-fetch(`${API.state}?token=${encodeURIComponent(token)}`)
-  .then((r) => r.json())
-  .then((state) => {
-    sessionNameEl.textContent = state.sessionName || 'Main';
-    status('idle');
-  })
-  .catch(() => status('offline'));

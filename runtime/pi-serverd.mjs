@@ -1,173 +1,141 @@
 // pi-serverd.mjs — durable pi sessions over the pi-server protocol (unix socket).
-// Remote attach flow: `ssh -L <localport>:<socket>` from the client machine, then
-// pi-client over a TCP transport; same machine: connect the socket directly.
+// Remote attach flow: `ssh -L <local.sock>:<socket>` from the client machine,
+// then pi-client over the unix transport; same machine: connect the socket directly.
 //
 // Env: HOME (storage root), PI_SERVERD_SOCK (socket path, default
 // $HOME/.pi-serverd/server.sock), PI_SERVERD_ID (stable serverId, default:
 // persisted random uuid), PI_WORKDIR (agent cwd), PI_PROVIDER/PI_MODEL.
-import { mkdir } from 'node:fs/promises';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { Harness, watchEvents, createRegistry } from '@earendil-works/pi-durable';
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
-import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
-import { CodingTools } from '@earendil-works/pi-durable/tools';
-import { createModels } from '@earendil-works/pi-ai/models';
-import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { createUnixServer } from '@earendil-works/pi-server/unix';
 import { SessionNotFoundError } from '@earendil-works/pi-server';
+import {
+  acquireOwnerLock, createCredentialStore, createEventHub, createModelCatalog,
+  ensureModel, isBusy, openHarness, pickModel, readJson, requestIdOf, sessionStore, Subagent,
+  whenBusyOf, writeFileAtomic,
+} from './common.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const HOME = process.env.HOME || ROOT;
 const STATE_DIR = `${HOME}/.pi-serverd`;
 const SOCK_PATH = process.env.PI_SERVERD_SOCK || `${STATE_DIR}/server.sock`;
 const WORKDIR = process.env.PI_WORKDIR || HOME;
-const MANIFEST = `${STATE_DIR}/sessions.json`;
+const LEGACY_MANIFEST = `${STATE_DIR}/sessions.json`;
 const DB = `${STATE_DIR}/harness.sqlite`;
 
-await mkdir(STATE_DIR, { recursive: true });
-await mkdir(WORKDIR, { recursive: true });
+// private state dir: pi-server does not authenticate unix-socket peers
+mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+try { chmodSync(STATE_DIR, 0o700); } catch {}
+mkdirSync(path.dirname(SOCK_PATH), { recursive: true, mode: 0o700 });
+mkdirSync(WORKDIR, { recursive: true });
+
+const releaseLock = await acquireOwnerLock(`${STATE_DIR}/serverd.lock`, 'pi-serverd.mjs');
 
 const ID_FILE = `${STATE_DIR}/server-id`;
 let serverId = process.env.PI_SERVERD_ID;
 if (!serverId) {
   try { serverId = readFileSync(ID_FILE, 'utf8').trim(); } catch {}
-  if (!serverId) { serverId = randomUUID(); writeFileSync(ID_FILE, serverId); }
+  if (!serverId) { serverId = randomUUID(); writeFileAtomic(ID_FILE, serverId, 0o644); }
 }
-
-const manifest = (() => {
-  try { return JSON.parse(readFileSync(MANIFEST, 'utf8')); } catch { return { sessions: {} }; }
-})();
-const saveManifest = () => writeFileSync(MANIFEST, JSON.stringify(manifest, null, 2));
 
 // --- harness ----------------------------------------------------------------
 
 const ctx = BACKGROUND_CONTEXT;
-const storage = await openNodeSqliteStorage(DB);
+const credentials = createCredentialStore(`${HOME}/.pi/agent/auth.json`);
+const models = await createModelCatalog(credentials);
 const env = new NodeExecutionEnv({ cwd: WORKDIR, env: process.env });
-// file-backed CredentialStore over ~/.pi/agent/auth.json (same file as pi CLI)
-const AUTH_PATH = `${HOME}/.pi/agent/auth.json`;
-const readAuthFile = () => {
-  try { return JSON.parse(readFileSync(AUTH_PATH, 'utf8')); } catch { return {}; }
-};
-// pi-ai uses the CredentialStore read/list/modify interface. The earlier
-// get()-only adapter made every stored API key invisible, leaving sessions
-// without a model and able to do little beyond the protocol handshake.
-const credentialStore = {
-  read: async (providerId) => readAuthFile()[providerId],
-  list: async () => Object.entries(readAuthFile()).map(([providerId, c]) => ({ providerId, type: c?.type })),
-  modify: async (providerId, fn) => {
-    const auth = readAuthFile();
-    const next = await fn(auth[providerId]);
-    if (next === undefined) delete auth[providerId]; else auth[providerId] = next;
-    await mkdir(path.dirname(AUTH_PATH), { recursive: true });
-    writeFileSync(AUTH_PATH, JSON.stringify(auth, null, 2), { mode: 0o600 });
-    return next;
-  },
-  delete: async (providerId) => {
-    const auth = readAuthFile();
-    delete auth[providerId];
-    await mkdir(path.dirname(AUTH_PATH), { recursive: true });
-    writeFileSync(AUTH_PATH, JSON.stringify(auth, null, 2), { mode: 0o600 });
-  },
-};
-const models = createModels({ credentials: credentialStore });
-for (const p of builtinProviders()) models.setProvider(p);
-const registry = createRegistry();
-registry.install(CodingTools);
-const harness = await Harness.open(storage, {
+const harness = await openHarness({
+  dbPath: DB,
   models,
-  registry,
-  env: () => env,
+  env: ({ cwd }) => (cwd && cwd !== WORKDIR ? new NodeExecutionEnv({ cwd, env: process.env }) : env),
+  extensions: [Subagent],
 }, ctx);
-harness.resume();
-async function pickModel() {
-  if (process.env.PI_PROVIDER && process.env.PI_MODEL) {
-    return { provider: process.env.PI_PROVIDER, modelId: process.env.PI_MODEL };
+const sessions = sessionStore(harness, ctx);
+
+// one-time import of the old JSON manifest
+{
+  const legacy = readJson(LEGACY_MANIFEST, null)?.sessions;
+  if (legacy && Object.keys(legacy).length && !(await sessions.list()).length) {
+    const n = await sessions.migrate(legacy);
+    writeFileAtomic(`${LEGACY_MANIFEST}.migrated`, JSON.stringify({ sessions: legacy }, null, 2));
+    try { unlinkSync(LEGACY_MANIFEST); } catch {}
+    console.log(`migrated ${n} sessions from ${LEGACY_MANIFEST}`);
   }
-  try {
-    const avail = await models.getAvailable();
-    const m = avail[0];
-    if (m) return { provider: m.provider, modelId: m.id };
-  } catch {}
-  return undefined;
 }
-const defaultModel = await pickModel();
+harness.resume();
 
-// --- per-conversation event buffers (long-poll, no chord subscription needed) -
+const events = createEventHub(harness, ctx);
 
-const buffers = new Map(); // conversationId -> {queue: [], waiters: []}
-async function bufferFor(convId) {
-  if (!buffers.has(convId)) {
-    const buf = { queue: [], waiters: [], cursor: 0 };
-    const stream = await watchEvents(harness, convId, ctx);
-    buf.snapshot = stream.snapshot;
-    stream.start(async (events) => {
-      buf.queue.push(...events);
-      for (const w of buf.waiters.splice(0)) w();
-    });
-    buffers.set(convId, buf);
-  }
-  return buffers.get(convId);
+async function conversationOf(sessionId) {
+  if (!(await sessions.get(sessionId))) throw new SessionNotFoundError(`unknown session: ${sessionId}`);
+  const conv = await harness.conversation(Number(sessionId), ctx);
+  if (!conv) throw new SessionNotFoundError(`session unavailable: ${sessionId}`);
+  return conv;
 }
 
 // --- routed session handles ---------------------------------------------------
 
-function routedSession(conversationId) {
+function routedSession(sessionId) {
   return {
     async attachClient() {
-      const conv = await harness.conversation(conversationId, ctx);
-      // Sessions created before a usable credential/model was available are
-      // retained durably. Give those legacy sessions the current default when
-      // they are attached instead of leaving submitted prompts unprocessable.
-      const view = await conv.viewState(ctx);
-      if (!view?.value?.agent?.model && defaultModel) await conv.configure({ model: defaultModel }, ctx);
-      const buf = await bufferFor(conversationId);
+      const conv = await conversationOf(sessionId);
+      // Sessions created before a credential existed have no model: give them
+      // the current default. Never overrides an explicit choice.
+      await ensureModel(conv, models, ctx);
       return {
         async invokeService(call, publish, context) {
           if (call.serviceId !== 'chat') throw new Error(`unknown service: ${call.serviceId}`);
+          const c = context ?? ctx;
+          const arg = call.args[0] ?? {};
           switch (call.member) {
             case 'prompt': {
-              const text = String(call.args[0]?.message ?? call.args[0] ?? '');
-              const sub = await conv.submit({ type: 'input', content: text }, context ?? ctx);
+              const text = String(arg.message ?? (typeof arg === 'string' ? arg : ''));
+              if (!(await ensureModel(conv, models, c))) {
+                throw new Error('no model: add a credential on the server');
+              }
+              const sub = await conv.submit({
+                type: 'input',
+                content: text,
+                requestId: requestIdOf(arg.requestId), // exactly-once across retries
+                whenBusy: whenBusyOf(arg.whenBusy),
+              }, c);
               return { submissionId: sub.id };
             }
             case 'abort':
-              await conv.abort(context ?? ctx);
+              await conv.abort(c);
               return { ok: true };
+            case 'compact': {
+              const taskId = await conv.compact(typeof arg.instructions === 'string' ? arg.instructions : undefined, c);
+              return { ok: true, taskId };
+            }
             case 'state': {
-              const s = await conv.viewState(context ?? ctx);
-              return s?.value ?? s;
+              const view = await conv.viewState(c);
+              try { return { ...view.value, busy: isBusy(view) }; } finally { view.dispose?.(); }
             }
             case 'configure': {
-              const model = call.args[0]?.model;
-              if (model) await conv.configure({ model }, context ?? ctx);
+              if (arg.model?.provider && arg.model?.modelId) {
+                await conv.configure({ model: { provider: String(arg.model.provider), modelId: String(arg.model.modelId) } }, c);
+              }
               return { ok: true };
             }
-            case 'snapshot':
-              return { snapshot: buf.snapshot };
             case 'history': {
               // entries() is newest-first; the UI needs chronological messages.
-              const limit = Math.min(Math.max(Number(call.args[0]?.limit) || 200, 1), 500);
-              const page = await conv.entries({}, limit, undefined, context ?? ctx);
-              return { entries: [...page.items].reverse() };
+              const limit = Math.min(Math.max(Number(arg.limit) || 200, 1), 500);
+              // position before the page: nothing is lost; repeats are deduped by entry id in the UI
+              const position = await events.position(sessionId);
+              const page = await conv.entries({}, limit, undefined, c);
+              return { entries: [...page.items].reverse(), ...position };
             }
             case 'events': {
-              // long-poll: wait for events newer than cursor (max ~25s)
-              const after = Number(call.args[0]?.cursor ?? -1);
-              const deadline = Date.now() + 25000;
-              while (buf.cursor === after && Date.now() < deadline && !buf.queue.length) {
-                await new Promise((r) => {
-                  buf.waiters.push(r);
-                  setTimeout(r, 1000);
-                });
-              }
-              const events = buf.queue.splice(0);
-              return { events, cursor: ++buf.cursor };
+              // long-poll; `after` is the last sequence number this client has seen
+              const after = Number(arg.after ?? -1);
+              const epoch = typeof arg.epoch === 'string' ? arg.epoch : undefined;
+              return events.poll(sessionId, after, { epoch, waitMs: 25_000, signal: c?.abortSignal });
             }
             default:
               throw new Error(`unknown member: ${call.member}`);
@@ -187,46 +155,35 @@ const host = {
       return {
         async invokeService(call, publish, context) {
           if (call.serviceId !== 'sessions') throw new Error(`unknown service: ${call.serviceId}`);
+          const c = context ?? ctx;
           switch (call.member) {
             case 'list':
-              // Newest first: a stale/test conversation must not become the
-              // implicit session just because it was created first.
-              return {
-                sessions: Object.entries(manifest.sessions)
-                  .map(([id, s]) => ({ id, ...s }))
-                  .sort((a, b) => String(b.created ?? '').localeCompare(String(a.created ?? ''))),
-              };
+              return { sessions: (await sessions.list()).map((s) => ({ cwd: WORKDIR, ...s })) };
             case 'models': {
               const available = await models.getAvailable();
               return { models: available.map((m) => ({ provider: m.provider, modelId: m.id })) };
             }
             case 'create': {
-              const conv = await harness.createConversation(
-                { ownership: { kind: 'ownerless' }, agent: { model: defaultModel } },
-                ctx,
+              const opts = call.args[0] ?? {};
+              const conv = await sessions.create(
+                { name: typeof opts.name === 'string' ? opts.name.slice(0, 100) : undefined, cwd: WORKDIR },
+                { agent: { model: await pickModel(models) } },
               );
-              manifest.sessions[conv.id] = {
-                conversationId: conv.id,
-                cwd: WORKDIR,
-                model: defaultModel,
-                created: new Date().toISOString(),
-              };
-              saveManifest();
-              return { id: conv.id };
+              return { id: String(conv.id) };
             }
             case 'delete': {
               const id = String(call.args[0]);
-              if (!manifest.sessions[id]) throw new SessionNotFoundError(`unknown session: ${id}`);
-              // The durable SQLite record is retained for safety; removing the
-              // manifest entry makes this session inaccessible to Remote.
-              delete manifest.sessions[id];
-              saveManifest();
+              const conv = await conversationOf(id);
+              // stop running work first; a hidden session must not keep using tools
+              await conv.abort(c);
+              // the transcript stays in SQLite; the registry entry is removed
+              await sessions.remove(id);
               return { ok: true };
             }
             case 'attach': {
               const id = String(call.args[0]);
-              if (!manifest.sessions[id]) throw new SessionNotFoundError(`unknown session: ${id}`);
-              await presentation.attachSession(id, context ?? ctx);
+              await conversationOf(id);
+              await presentation.attachSession(id, c);
               return { ok: true };
             }
             default:
@@ -238,14 +195,28 @@ const host = {
     },
   },
   async resolveSession(sessionId) {
-    if (!manifest.sessions[sessionId]) throw new SessionNotFoundError(`unknown session: ${sessionId}`);
-    return { id: sessionId };
+    if (!(await sessions.get(sessionId))) throw new SessionNotFoundError(`unknown session: ${sessionId}`);
+    return { id: String(sessionId) };
   },
   async openSession(metadata) {
-    return routedSession(manifest.sessions[metadata.id].conversationId);
+    return routedSession(metadata.id);
   },
 };
 
-const server = createUnixServer(host, { serverId, path: SOCK_PATH });
+const server = createUnixServer(host, { serverId, path: SOCK_PATH, mode: 0o600 });
 await server.start();
 console.log(`pi-serverd on ${SOCK_PATH} (serverId ${serverId})`);
+
+let stopping = false;
+async function shutdown(signal) {
+  if (stopping) return;
+  stopping = true;
+  console.log(`pi-serverd: ${signal}, closing`);
+  try { await server.close?.(); } catch {}
+  try { await events.close(); } catch {}
+  try { await harness.close(ctx); } catch (e) { console.error('harness.close:', e?.message || e); }
+  releaseLock();
+  process.exit(0);
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

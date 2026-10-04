@@ -4,7 +4,7 @@
 > development. Remote sessions, the embedded Termux runtime, and Android
 > background-process handling may still change or fail on individual devices.
 >
-> **Quick & dirty version 0.**
+> **Version 0.0.1** — still quick & dirty, see the [changelog](#changelog).
 
 Minimal Android app that embeds Termux-built binaries (Node.js 26.4.0, bash,
 coreutils, git, ripgrep, fd, openssh, npm, util-linux `script`, …) plus a
@@ -26,8 +26,9 @@ and per-conversation execution environments — including remote hosts.
   model dropdown). `pi mobile` header links back here from every page.
 - **Accounts** (`keys.html`) — API-key management plus OAuth/subscription
   sign-in. Credentials are stored as `~/.pi/agent/auth.json` in pi CLI format.
-- **Sessions** (`sessions.html`) — local durable-session browser: create a
-  session, reopen an earlier one, or remove it from the visible list.
+- **Sessions** (`sessions.html`) — local durable-session browser: create,
+  open, rename, fork (continue from a session's newest entry), or stop and
+  remove a session from the visible list.
 - **Clients** (`clients.html`) — remote SSH host registry + device keypair
   (ed25519): generate, show pubkey, interactive `ssh-copy-id` in the
   terminal page.
@@ -73,20 +74,30 @@ node pi-serverd.mjs        # socket: ~/.pi-serverd/server.sock
 ```
 
 The phone bridge (`runtime/remote-client.mjs`) forwards the remote unix
-socket through the saved SSH client entry (`ssh -N -L port:~/.pi-serverd/server.sock`
-— OpenSSH 6.7+ unix→tcp forwarding; SSH is the auth, no extra token), then
-attaches via `@earendil-works/pi-client` with a small TCP
-`ByteTransportFactory`. `user@host:port` is converted to OpenSSH's `-p port`
+socket through the saved SSH client entry to a unix socket in the app-private
+directory (`ssh -N -L ~/.pi-mobile/tunnels/<id>.sock:~/.pi-serverd/server.sock`,
+OpenSSH 6.7+). A loopback TCP port would be reachable by every app on the
+phone, and pi-server does not authenticate peers; SSH is the only auth. It then
+attaches via `@earendil-works/pi-client`'s unix transport. A dropped tunnel is
+rebuilt with backoff and the session is re-attached; prompts carry a
+`requestId`, so a retried prompt is answered exactly once. `user@host:port` is converted to OpenSSH's `-p port`
 form. The Remote page connects and loads sessions as soon as a host is
 selected, creates one automatically when the host has none, opens the newest
 session first, restores its transcript, and displays a model picker using the
 remote host's available models. Remote uses non-interactive SSH key login, so
 run **⇧key** / `ssh-copy-id` for a host before using it here.
-Endpoints: `/api/remote/{connect,sessions,models,model,create,delete,attach,prompt,abort,state,history,events,disconnect}`.
+Endpoints: `/api/remote/{connect,status,sessions,models,model,create,delete,attach,prompt,abort,compact,state,history,events,disconnect}`.
+Events are long-polled with a sequence number and an epoch (`?after=<seq>&epoch=<id>`);
+several clients can read the same session, a lost response is fetched again,
+and a client that fell behind or saw a daemon restart gets `reset` and reloads
+the transcript.
 
-Deleting a session removes its entry from `~/.pi-serverd/sessions.json`, so it
-no longer appears or can be attached through Remote. Its SQLite data is kept
-as a safety measure; it is not a destructive database purge. `pi-client` runs
+The session list is a pi-durable document (`app.sessions`) in
+`~/.pi-serverd/harness.sqlite`, written in the same commit that creates a
+conversation; an old `sessions.json` is imported once. Deleting a session first
+aborts its running work, then removes its registry entry, so it no longer
+appears or can be attached through Remote. Its transcript is kept in SQLite; it
+is not a destructive purge. The state directory is `0700` and the socket `0600`. `pi-client` runs
 on the phone as the protocol client, while the durable harness, model calls,
 and tools run in `pi-serverd` on the remote host. For the full interactive Pi
 TUI instead, use **Clients → ▸_** or **pi CLI (ssh)**; run it in `tmux` when an
@@ -98,20 +109,24 @@ A conversation whose cwd is `remote:<name>:/path` runs its tools on that
 host via `runtime/remote-env.mjs` (client) + `runtime/env-server.mjs`:
 
 ```bash
-# on the remote machine — Node >= 22, no deps
-PI_REMOTE_TOKEN=<secret> PI_REMOTE_PORT=7842 node env-server.mjs
+# on the remote machine — Node >= 22, no deps; binds 127.0.0.1 by default
+PI_REMOTE_TOKEN=<secret, >=16 chars> PI_REMOTE_PORT=7842 node env-server.mjs
+# reach it via ssh -L or a VPN address: PI_REMOTE_HOST=<tailscale-ip>
 
-# on the phone (env of the node process / PiService)
-PI_REMOTES='{"workstation":{"url":"http://host:7842","token":"<secret>"}}'
+# on the phone: files/home/.pi-mobile/remotes.json (or PI_REMOTES env)
+{"workstation": {"url": "http://127.0.0.1:7842", "token": "<secret>"}}
 ```
 
-Use Tailscale/WireGuard instead of plain LAN HTTP where possible — the env
-server executes arbitrary commands.
+Output is streamed (NDJSON); aborting a tool call kills the command's whole
+process group on the remote host. Never expose env-server on a LAN without a
+tunnel/VPN — it executes arbitrary commands.
 
 ## Layout
 
 - `android/` — Gradle project (app module, Java only, no NDK)
 - `runtime/` — `server.mjs` (durable bridge + `/pty` WS + remote attach),
+  `common.mjs` (shared harness setup, credential store with file lock, durable
+  session registry, sequenced event hub, single-owner lock),
   `pi-serverd.mjs` (remote session daemon), `remote-client.mjs` (pi-client
   + ssh tunnel), `remote-env.mjs`/`env-server.mjs` (tool exec),
   `public/` (chat, keys, clients, remote, terminal pages + shared menu),
@@ -136,7 +151,8 @@ Toolchain notes:
   targetSdk >= 29). `PiService` falls back to launching node via
   `/system/bin/linker64` if direct exec ever fails, so targetSdk can be raised.
 - `RUNTIME_VERSION` in `RuntimeInstaller.java` gates re-extraction — bump it
-  whenever assets change.
+  whenever assets change. An upgrade replaces `usr/` and `runtime/` entirely
+  (archives are streamed into tar); `home/` and `work/` are kept.
 
 ## Repackaging assets
 
@@ -152,7 +168,7 @@ cd runtime
 find node_modules -type d -name .bin -exec rm -rf {} +    # npm recreates these!
 find node_modules -type l ! -exec test -e {} \; -delete
 tar czf ../android/app/src/main/assets/runtime.bin --transform 's,^,runtime/,' \
-  server.mjs remote-env.mjs env-server.mjs pi-serverd.mjs remote-client.mjs \
+  server.mjs common.mjs remote-env.mjs env-server.mjs pi-serverd.mjs remote-client.mjs \
   package.json package-lock.json public node_modules
 ```
 
@@ -168,12 +184,18 @@ adb install android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 First launch extracts ~170 MB to app-private storage, then a foreground
-service starts `node runtime/server.mjs`. Open the app → **Accounts** page to
+service starts `node runtime/server.mjs`. The service runs exactly one bridge:
+reopening the app attaches to the running one instead of restarting it, a
+crashed bridge is restarted with backoff, and stopping sends SIGTERM so the
+harness closes cleanly. `server.mjs` holds `~/.pi-mobile/server.lock`
+(pi-durable allows one storage owner) and stops an orphaned predecessor. Open the app → **Accounts** page to
 store a provider key or sign in through OAuth, then prompt. Local conversation state lives in
-`files/home/.pi-mobile/harness.sqlite` and survives process death. The
-**Sessions** page lists local sessions, opens an earlier session, creates a
-new one, or removes a session from the visible list; the session registry is
-stored in `files/home/.pi-mobile/sessions.json`.
+`files/home/.pi-mobile/harness.sqlite` and survives process death. The session
+registry and the active session are a pi-durable document in the same
+database (an old `sessions.json` is imported once), so a restart reopens the
+session that was active. The chat streams answers, shows tool output (tap a
+tool line), subagent children, usage, and offers *steer* while a run is busy;
+every prompt carries a `requestId` so retries are exactly-once.
 
 Caveats on device:
 
@@ -191,6 +213,87 @@ Caveats on device:
   PTY (control frames are `\x01`-prefixed JSON on the WS).
 
 See ANALYSE.md for the full evaluation and upstream facts.
+
+## Changelog
+
+### 0.0.1 — 2026-10-04
+
+Lots of bugfixes around durable sessions, security and the Android service.
+
+**Security**
+
+- Remote attach tunnels a unix socket in the app-private directory
+  (`ssh -L local.sock:remote.sock`) instead of a loopback TCP port that every
+  app on the phone could reach — pi-server does not authenticate peers.
+- An unauthenticated request for a directory (e.g. `GET /vendor`) no longer
+  crashes the bridge (unhandled `EISDIR`); static serving is confined to
+  `public/`.
+- Host-header check against DNS rebinding, constant-time token comparison,
+  request body limit, token removed from the visible URL/history.
+- SSH targets are validated (`user@host[:port]`); option-like targets such as
+  `-oProxyCommand=…` are rejected, `--` is passed before the host.
+- `env-server.mjs` binds `127.0.0.1` by default, requires a token of at least
+  16 characters, compares it in constant time and limits body size.
+- `pi-serverd` keeps its state directory at `0700` and its socket at `0600`.
+- `auth.json` is written atomically under a lock file (bridge and pi-serverd),
+  so a concurrent OAuth refresh cannot lose a rotated refresh token.
+- Cleartext HTTP is allowed only for `127.0.0.1`/`localhost`
+  (network security config instead of `usesCleartextTraffic`).
+- The remote host key fingerprint is shown on connect (trust on first use).
+
+**Durable sessions**
+
+- The selected model is no longer overwritten before every prompt and on every
+  remote attach (the code read `viewState().value.agent`, which does not exist;
+  agent choices live in `docs['pi.agent']`). `busy` is derived from
+  `docs['pi.live'].run`.
+- Prompts carry a client-generated `requestId`: retries after a dropped
+  connection are exactly-once.
+- Every SSE client gets its own `watchEvents()` stream, so a reconnecting chat
+  shows the current state instead of the snapshot from when the session was
+  opened; pi-durable's `snapshot` and `agent_changed` events are handled.
+- Remote events are sequence-numbered with an epoch: several clients can read
+  one session, a lost response is fetched again, and a client that fell behind
+  or saw a daemon restart reloads the transcript.
+- A dropped remote tunnel is rebuilt with backoff and the session re-attached.
+- The session registry and the active session are a pi-durable document in
+  the same SQLite database, written in the same commit as the conversation;
+  old `sessions.json` files are imported once. The active session survives a
+  restart.
+- Deleting a session aborts its running work first.
+- The subagent tool returns the child's answer again (the child handle has no
+  `commit()`); its child conversation is shown in the transcript.
+- One storage owner: `server.mjs`/`pi-serverd.mjs` take a lock file and stop an
+  orphaned predecessor; both close the harness on `SIGTERM`.
+
+**Android**
+
+- Opening the app no longer restarts the running bridge (which interrupted
+  running tool calls and briefly opened the database twice). The service runs
+  exactly one node process, restarts it with backoff if it dies, and stops it
+  with `SIGTERM` + grace period.
+- One non-reference-counted wake lock instead of one per start.
+- Runtime archives are streamed into `tar` (no temporary 170 MB copy); an
+  upgrade replaces `usr/` and `runtime/` completely, user data in `home/` and
+  `work/` is kept. `RUNTIME_VERSION` 43.
+- Node log rotation; longer first-start wait in the WebView.
+
+**UI**
+
+- Answers stream live (the old code expected a non-existent event shape),
+  tool output can be expanded, subagent children and usage/cost are shown.
+- *Steer* while a run is busy, *Compact context*, fork and rename sessions,
+  remote abort/compact and a reconnect status.
+- Shared transcript renderer for local and remote chat, deduplicated by entry
+  id; generic `.hidden` CSS rule (remote controls were never hidden).
+
+**Other**
+
+- `env-server`: streamed output (NDJSON); aborting a tool call kills the
+  command's whole process group. Remotes can be configured in
+  `~/.pi-mobile/remotes.json`.
+- Shared `runtime/common.mjs` for both servers; `PI_TEST_FAUX=1` provides a
+  scripted offline model for tests.
 
 ---
 

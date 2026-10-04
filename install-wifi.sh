@@ -61,5 +61,5 @@ echo "installed: $APK"
 # optional: start app and show bridge port once the runtime is up
 "$ADB" -s "$DEV" shell am start -n org.pimobile.app/.MainActivity >/dev/null
 echo "app started; bridge port (after first-boot extraction):"
-echo "  $ADB -s $DEV shell run-as org.pimobile.app cat /data/data/org.pimobile.app/files/.pi-mobile/port"
+echo "  $ADB -s $DEV shell run-as org.pimobile.app cat /data/data/org.pimobile.app/files/home/.pi-mobile/port"
 echo "runtime log: ... files/log/node.log (same run-as trick)"

@@ -31,17 +31,50 @@ export class RemoteExecutionEnv {
     }
   }
 
+  // Streams NDJSON output lines as they arrive. Aborting the context closes the
+  // request, which makes env-server kill the command's process group.
   async exec(command, options, context) {
-    const r = await this.#call('exec', {
-      command, cwd: options?.cwd ?? this.cwdPath, env: options?.env,
-      timeout: options?.timeout, inheritEnv: options?.inheritEnv,
-    }, context);
-    if (!r.ok) {
-      return { ok: false, error: new RemoteExecError('unknown', String(r.error?.message || r.error)) };
+    if (context?.signal?.aborted) return { ok: false, error: new RemoteExecError('aborted', 'aborted') };
+    let res;
+    try {
+      res = await fetch(`${this.baseUrl}/exec`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.token}` },
+        body: JSON.stringify({
+          command, cwd: options?.cwd ?? this.cwdPath, env: options?.env,
+          timeout: options?.timeout, inheritEnv: options?.inheritEnv, stream: true,
+        }),
+        signal: context?.signal,
+      });
+    } catch (e) {
+      return { ok: false, error: new RemoteExecError(context?.signal?.aborted ? 'aborted' : 'unknown', String(e?.message || e)) };
     }
-    const out = r.value.output ?? '';
-    if (out && options?.onOutput) options.onOutput(out, context);
-    return { ok: true, value: { exitCode: r.value.exitCode ?? 1, spillPath: r.value.spillPath } };
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      return { ok: false, error: new RemoteExecError('unknown', String(body.error?.message || body.error || `http ${res.status}`)) };
+    }
+    let result = null;
+    let pending = '';
+    const decoder = new TextDecoder();
+    const handle = (line) => {
+      if (!line.trim()) return;
+      const msg = JSON.parse(line);
+      if (msg.output !== undefined) { if (options?.onOutput) options.onOutput(msg.output, context); }
+      else result = msg;
+    };
+    try {
+      for await (const chunk of res.body) {
+        pending += decoder.decode(chunk, { stream: true });
+        let nl;
+        while ((nl = pending.indexOf('\n')) >= 0) { handle(pending.slice(0, nl)); pending = pending.slice(nl + 1); }
+      }
+      handle(pending);
+    } catch (e) {
+      return { ok: false, error: new RemoteExecError(context?.signal?.aborted ? 'aborted' : 'unknown', String(e?.message || e)) };
+    }
+    if (!result) return { ok: false, error: new RemoteExecError('unknown', 'connection closed before exit status') };
+    if (result.output && options?.onOutput) options.onOutput(result.output, context);
+    return { ok: true, value: { exitCode: result.exitCode ?? 1 } };
   }
 
   async absolutePath(p, context) {
