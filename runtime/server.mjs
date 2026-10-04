@@ -34,6 +34,7 @@ const STATE_DIR = path.join(HOME_DIR, '.pi-mobile');
 const PORT_FILE = path.join(STATE_DIR, 'port');
 const TOKEN_FILE = path.join(STATE_DIR, 'token');
 const SESSIONS_FILE = path.join(STATE_DIR, 'sessions.json');
+const DEVICE_ID_FILE = path.join(STATE_DIR, 'device-id');
 const PUBLIC = path.join(ROOT, 'public');
 const REMOTES = JSON.parse(process.env.PI_REMOTES || '{}');
 
@@ -150,6 +151,35 @@ async function pickModel() {
 
 const models = createModels({ credentials: credentialStore });
 for (const p of builtinProviders()) models.setProvider(p);
+const oauthLogins = new Map();
+function deviceId() {
+  try { return readFileSync(DEVICE_ID_FILE, 'utf8').trim(); } catch {}
+  const id = crypto.randomUUID();
+  mkdir(STATE_DIR, { recursive: true }).then(() => writeFile(DEVICE_ID_FILE, id, { mode: 0o600 }));
+  return id;
+}
+function startOAuthLogin(providerId) {
+  const provider = models.getProvider(providerId);
+  if (!provider?.auth.oauth) throw new Error(`${providerId} does not support OAuth login`);
+  const id = crypto.randomUUID();
+  const login = { id, events: [], prompt: null, done: false, error: null, credential: null };
+  oauthLogins.set(id, login);
+  const interaction = {
+    signal: new AbortController().signal,
+    notify: (event) => login.events.push(event),
+    prompt: (prompt) => new Promise((resolve, reject) => {
+      login.prompt = { id: crypto.randomUUID(), prompt, resolve, reject };
+    }),
+  };
+  models.login(providerId, 'oauth', interaction, { getDeviceId: deviceId })
+    .then(async (credential) => {
+      login.credential = credential;
+      login.done = true;
+      try { await models.refresh({ providers: [providerId] }); } catch {}
+    })
+    .catch((error) => { login.error = String(error?.message || error); login.done = true; });
+  return login;
+}
 
 function readLocalSessions() {
   try { return JSON.parse(readFileSync(SESSIONS_FILE, 'utf8')); } catch { return { sessions: {} }; }
@@ -431,6 +461,33 @@ const server = http.createServer(async (req, res) => {
       }
       if (p === '/api/remote/disconnect' && req.method === 'POST') {
         await remoteState.disconnect();
+        return json(res, 200, { ok: true });
+      }
+      if (p === '/api/oauth/providers' && req.method === 'GET') {
+        return json(res, 200, { providers: models.getProviders()
+          .filter((provider) => Boolean(provider.auth.oauth))
+          .map((provider) => ({ id: provider.id, name: provider.name, label: provider.auth.oauth?.loginLabel || provider.auth.oauth?.name })) });
+      }
+      if (p === '/api/oauth/start' && req.method === 'POST') {
+        const login = startOAuthLogin(String(body.provider || ''));
+        return json(res, 200, { id: login.id });
+      }
+      if (p === '/api/oauth/status' && req.method === 'GET') {
+        const login = oauthLogins.get(url.searchParams.get('id'));
+        if (!login) return json(res, 404, { error: 'unknown login' });
+        const prompt = login.prompt?.prompt;
+        return json(res, 200, {
+          events: login.events.splice(0), done: login.done, error: login.error,
+          prompt: prompt ? { id: login.prompt.id, type: prompt.type, message: prompt.message,
+            placeholder: prompt.placeholder, options: prompt.options } : null,
+        });
+      }
+      if (p === '/api/oauth/respond' && req.method === 'POST') {
+        const login = oauthLogins.get(String(body.id || ''));
+        if (!login?.prompt || login.prompt.id !== body.promptId) return json(res, 400, { error: 'no matching prompt' });
+        const pending = login.prompt;
+        login.prompt = null;
+        pending.resolve(String(body.value ?? ''));
         return json(res, 200, { ok: true });
       }
       if (p === '/api/auth' && req.method === 'POST') {

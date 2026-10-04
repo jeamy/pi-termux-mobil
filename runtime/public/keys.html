@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>pi mobile — API keys</title>
+  <title>pi mobile — Accounts</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body data-page="keys">
   <header>
-    <div id="menubar"><span id="status">API keys</span></div>
+    <div id="menubar"><span id="status">Accounts</span></div>
   </header>
   <main id="keys-page">
     <h2>Active keys</h2>
@@ -31,7 +31,25 @@
       <button type="submit" id="add-btn">+ api key hinzufügen</button>
     </form>
     <p id="msg"></p>
+    <section id="oauth-box">
+      <h2>OAuth / subscription</h2>
+      <div class="hdr-btns">
+        <select id="oauth-provider"></select>
+        <button id="oauth-login">sign in</button>
+      </div>
+      <p id="oauth-status" class="key-empty"></p>
+    </section>
   </main>
+  <dialog id="oauth-dialog">
+    <h3 id="oauth-dialog-title">Sign in</h3>
+    <p id="oauth-dialog-message"></p>
+    <select id="oauth-dialog-select" class="hidden"></select>
+    <input id="oauth-dialog-input" class="hidden" type="text" autocomplete="off">
+    <div class="dlg-btns">
+      <button id="oauth-dialog-cancel" type="button">cancel</button>
+      <button id="oauth-dialog-submit" type="button">continue</button>
+    </div>
+  </dialog>
   <script type="module" src="keys.js"></script>
 </body>
 </html>

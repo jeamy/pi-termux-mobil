@@ -27,7 +27,7 @@ export function renderMenu() {
   menu.className = 'hidden';
   menu.innerHTML = `
     <a href="${q('/')}" data-pg="chat">Chat</a>
-    <a href="${q('/keys.html')}" data-pg="keys">API keys</a>
+    <a href="${q('/keys.html')}" data-pg="keys">Accounts</a>
     <a href="${q('/sessions.html')}" data-pg="sessions">Sessions</a>
     <a href="${q('/clients.html')}" data-pg="clients">Clients</a>
     <a href="${q('/remote.html')}" data-pg="remote">Remote</a>

@@ -25,6 +25,20 @@ public final class MainActivity extends Activity {
         webView.setWebChromeClient(new android.webkit.WebChromeClient());
         webView.setWebViewClient(new WebViewClient() {
             @Override
+            public boolean shouldOverrideUrlLoading(WebView view, android.webkit.WebResourceRequest request) {
+                android.net.Uri uri = request.getUrl();
+                String host = uri.getHost();
+                // OAuth providers must open in a real browser. Keep the local
+                // bridge and its loopback callback inside this WebView.
+                if (("http".equals(uri.getScheme()) || "https".equals(uri.getScheme()))
+                        && host != null && !"127.0.0.1".equals(host) && !"localhost".equals(host)) {
+                    startActivity(new Intent(Intent.ACTION_VIEW, uri));
+                    return true;
+                }
+                return false;
+            }
+
+            @Override
             public void onReceivedError(WebView view, android.webkit.WebResourceRequest request,
                                         android.webkit.WebResourceError error) {
                 if (request.isForMainFrame()) {

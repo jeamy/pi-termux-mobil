@@ -24,8 +24,8 @@ and per-conversation execution environments — including remote hosts.
 
 - **Chat** (`/`) — durable pi conversation (prompt, abort, new session,
   model dropdown). `pi mobile` header links back here from every page.
-- **API keys** (`keys.html`) — provider key management (list/add/delete,
-  stored as `~/.pi/agent/auth.json` in pi CLI format).
+- **Accounts** (`keys.html`) — API-key management plus OAuth/subscription
+  sign-in. Credentials are stored as `~/.pi/agent/auth.json` in pi CLI format.
 - **Sessions** (`sessions.html`) — local durable-session browser: create a
   session, reopen an earlier one, or remove it from the visible list.
 - **Clients** (`clients.html`) — remote SSH host registry + device keypair
@@ -38,6 +38,17 @@ and per-conversation execution environments — including remote hosts.
   → `node cli.js`, with on-screen extra keys (esc/tab/ctrl/arrows/pgup/pgdn)
   for menus and scrollback. `?ssh=user@host` runs `ssh -tt <host> pi`
   instead — full remote pi TUI.
+
+## Accounts: API keys and OAuth
+
+The **Accounts** page supports both API keys and provider OAuth/subscription
+logins. Select an OAuth provider under **OAuth / subscription**, then choose
+**sign in**. When a provider offers multiple methods, the app shows a dialog
+for example for **Browser login** or **Device code login**. Browser flows open
+in the Android browser and return through the app's loopback callback; device
+flows show the verification URL and code in the app. Completed credentials are
+stored in `~/.pi/agent/auth.json` and immediately become available to the
+model picker.
 
 ## Remote control, two ways
 
@@ -157,8 +168,8 @@ adb install android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 First launch extracts ~170 MB to app-private storage, then a foreground
-service starts `node runtime/server.mjs`. Open the app → API keys page to
-store a provider key, then prompt. Local conversation state lives in
+service starts `node runtime/server.mjs`. Open the app → **Accounts** page to
+store a provider key or sign in through OAuth, then prompt. Local conversation state lives in
 `files/home/.pi-mobile/harness.sqlite` and survives process death. The
 **Sessions** page lists local sessions, opens an earlier session, creates a
 new one, or removes a session from the visible list; the session registry is

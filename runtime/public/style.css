@@ -113,7 +113,8 @@ body.term-page { overflow: hidden; }
 #menu a:active { background: #2a2a34; }
 header { position: relative; }
 
-#keys-page { padding: 16px; }
+#keys-page { padding: 16px; display: flex; flex: 1; flex-direction: column; }
+#oauth-box { margin-top: auto; padding-top: 20px; }
 #keys-page h2 { font-size: 15px; color: #9a9aa5; margin: 14px 0 8px; }
 .key-row {
   display: flex;
@@ -135,7 +136,7 @@ header { position: relative; }
 }
 .key-empty { color: #9a9aa5; }
 #add-form { display: flex; flex-direction: column; gap: 8px; max-width: 420px; }
-#add-form select, #add-form input {
+#add-form select, #add-form input, #oauth-provider {
   background: #1c1c24;
   color: #e4e4e8;
   border: 1px solid #2a2a34;
@@ -143,6 +144,16 @@ header { position: relative; }
   padding: 10px;
   font-size: 15px;
 }
+#oauth-provider {
+  flex: 1;
+  min-width: 0;
+  color: #e4e4e8;
+  border: 1px solid #2a2a34;
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 15px;
+}
+#oauth-status a { color: #9ab7ff; }
 #add-btn {
   background: #3a5bf0;
   color: #fff;
