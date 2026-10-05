@@ -47,7 +47,7 @@ Screenshots from a phone (SSH key and host addresses blacked out).
 | Chat | Remote (connected) |
 |---|---|
 | <img src="docs/screens/chat.png" width="260" alt="Chat page"> | <img src="docs/screens/remote.png" width="260" alt="Remote page connected to a host"> |
-| Durable pi conversation with model dropdown, session name, token/cost counter and new / compact buttons. | Host selector with **connect/disconnect** and **stop server**, remote session dropdown (rename, new, remove, abort, compact) and the conversation running on the host. |
+| Local conversation running on the phone (durable: SQLite-backed, survives process death), with model dropdown, session name, token/cost counter and new / compact buttons. | Host selector with **connect/disconnect** and **stop server**, remote session dropdown (rename, new, remove, abort, compact) and a conversation that runs in `pi-serverd` on the host (also durable, stored there; the phone is only the client and re-attaches after a lost connection). |
 
 | pi CLI | Clients |
 |---|---|
@@ -131,6 +131,16 @@ PI_REMOTE_TOKEN=<secret, >=16 chars> PI_REMOTE_PORT=7842 node env-server.mjs
 # on the phone: files/home/.pi-mobile/remotes.json (or PI_REMOTES env)
 {"workstation": {"url": "http://127.0.0.1:7842", "token": "<secret>"}}
 ```
+
+env-server is not `pi-serverd`: `pi-serverd` (section 1/2) runs the whole
+conversation on the host, while env-server only executes single tool calls for a
+conversation that stays on the phone. It is a small HTTP server (POST, JSON,
+bearer token compared in constant time) with two endpoints: `/exec` runs
+`bash -c <command>` (optional `cwd`, `env`, `timeout`, `stream`; output capped at
+8 MB when not streamed) and `/fs` performs file operations (`read`, `write`,
+`append`, `truncate`, `rename`, `info`, `list`, `exists`, `mkdir`, `remove`,
+`canonical`, `tempdir`, `tempfile`; contents as base64). It starts only with a
+token of at least 16 characters.
 
 Output is streamed (NDJSON); aborting a tool call kills the command's whole
 process group on the remote host. Never expose env-server on a LAN without a
