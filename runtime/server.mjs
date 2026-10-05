@@ -81,7 +81,7 @@ function startPiUpdate() {
     spawnArgs = [npmBin, ['install']];
   }
   const pkgs = EARENDIL_PKGS.map(p => `${p}@latest`);
-  const child = spawn(spawnArgs[0], [...spawnArgs[1], ...pkgs, '--no-fund', '--no-audit', '--ignore-scripts'], {
+  const child = spawn(spawnArgs[0], [...spawnArgs[1], ...pkgs, '--no-fund', '--no-audit', '--ignore-scripts', '--no-package-lock'], {
     cwd: ROOT, env: { ...process.env, npm_config_cache: path.join(HOME_DIR, '.npm') },
   });
   const addLog = (d) => { for (const l of String(d).split('\n')) { const t = l.trimEnd(); if (t) { piUpdate.log.push(t); if (piUpdate.log.length > 500) piUpdate.log.shift(); } } };
