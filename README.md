@@ -40,6 +40,20 @@ and per-conversation execution environments — including remote hosts.
   for menus and scrollback. `?ssh=user@host` runs `ssh -tt <host> pi`
   instead — full remote pi TUI.
 
+## App screens
+
+Screenshots from a phone (SSH key and host addresses blacked out).
+
+| Chat | Remote (connected) |
+|---|---|
+| <img src="docs/screens/chat.png" width="260" alt="Chat page"> | <img src="docs/screens/remote.png" width="260" alt="Remote page connected to a host"> |
+| Durable pi conversation with model dropdown, session name, token/cost counter and new / compact buttons. | Host selector with **connect/disconnect** and **stop server**, remote session dropdown (rename, new, remove, abort, compact) and the conversation running on the host. |
+
+| pi CLI | Clients |
+|---|---|
+| <img src="docs/screens/pi-cli.png" width="260" alt="pi CLI terminal"> | <img src="docs/screens/clients.png" width="260" alt="Clients page"> |
+| Full interactive pi TUI in the built-in terminal, with an esc / ctrl / arrow key row. | SSH key of this device and the list of remote hosts, each with terminal, key-install and remove buttons. |
+
 ## Accounts: API keys and OAuth
 
 The **Accounts** page supports both API keys and provider OAuth/subscription
