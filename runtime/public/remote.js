@@ -11,6 +11,7 @@ const chat       = document.getElementById('chat');
 const composer   = document.getElementById('composer');
 const input      = document.getElementById('input');
 const btnConnect = document.getElementById('btn-connect');
+const btnStop    = document.getElementById('btn-stop-server');
 const btnNew     = document.getElementById('btn-new-session');
 const btnRename  = document.getElementById('btn-rename-session');
 const btnDelete  = document.getElementById('btn-delete-session');
@@ -245,6 +246,19 @@ async function connectHost() {
 hostSel.addEventListener('change', () => {
   // host change only resets UI; user clicks connect explicitly
   if (connected || connecting) disconnectHost();
+});
+btnStop.addEventListener('click', async () => {
+  const target = hostSel.value;
+  if (!target || connecting) return;
+  if (!confirm(`Stop pi-serverd on ${target}?\nRunning work on that host is aborted. It is started (and updated if needed) again on the next connect.`)) return;
+  btnStop.disabled = true;
+  try {
+    connectGeneration++;
+    resetUi();
+    transcript.sys(`stopping server on ${target}…`);
+    const r = await post(API.remoteStop, { target });
+    transcript.sys(r.error ? `error: ${r.error}` : r.stopped ? 'remote server stopped' : 'remote server was not running');
+  } finally { btnStop.disabled = false; }
 });
 btnConnect.addEventListener('click', () => (connected || connecting ? disconnectHost() : connectHost()));
 

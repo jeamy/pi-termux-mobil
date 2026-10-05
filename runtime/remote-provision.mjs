@@ -106,6 +106,17 @@ fi
 command -v tmux >/dev/null 2>&1 && echo tmux-installed
 true`;
 const STOP = `${PID} [ "$p" != 0 ] || exit 1; kill -TERM "$p"; for i in $(seq 1 20); do kill -0 "$p" 2>/dev/null || exit 0; sleep .5; done; kill -KILL "$p" 2>/dev/null;`;
+// Stop the daemon on the host (also ends its tmux session, since node is exec'd in it).
+// Returns false when no pi-serverd was running. Next connect provisions/updates again.
+export async function stopRemoteServer({ ssh, prefix = '', log = () => {} }) {
+  const ctx = makeCtx(ssh, prefix);
+  const info = await probeHost(ctx);
+  if (info.running !== '1') { await sshRun(ctx, `tmux kill-session -t ${TMUX_SESSION} 2>/dev/null; true`); return false; }
+  const r = await sshRun(ctx, STOP, { onLine: log });
+  if (r.code !== 0) throw new Error(`could not stop pi-serverd: ${r.err}`);
+  await sshRun(ctx, `tmux kill-session -t ${TMUX_SESSION} 2>/dev/null; true`);
+  return true;
+}
 const RUN_CMD = `${PRELUDE}cd "$HOME/${REMOTE_DIR}" && exec node pi-serverd.mjs`;
 const START_TMUX = `tmux has-session -t ${TMUX_SESSION} 2>/dev/null && exit 1; tmux new-session -d -s ${TMUX_SESSION} ${shq(`exec bash -l -c ${shq(RUN_CMD)}`)}`;
 const START_NOHUP = `cd "$HOME/${REMOTE_DIR}" || exit 1; if command -v setsid >/dev/null 2>&1; then L=setsid; else L=""; fi; nohup $L bash -l -c ${shq(RUN_CMD)} >> "$HOME/${REMOTE_DIR}/serverd.log" 2>&1 < /dev/null &`;

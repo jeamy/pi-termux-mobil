@@ -41,6 +41,7 @@ export const API = {
   remoteHistory: '/api/remote/history',
   remoteEvents: '/api/remote/events',
   remoteDisconnect: '/api/remote/disconnect',
+  remoteStop: '/api/remote/stop',
   remoteAuthStatus: '/api/remote/auth-status',
   remoteCopyAuth: '/api/remote/copy-auth',
   remoteTrustHost: '/api/remote/trust-host',

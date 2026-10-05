@@ -87,7 +87,7 @@ session first, restores its transcript, and displays a model picker using the
 remote host's available models. Remote uses non-interactive SSH key login, so
 run **⇧key** / `ssh-copy-id` for a host before using it here.
 On connect the app checks the host and sets it up if needed — see [Remote host setup](#remote-host-setup-automatic).
-Endpoints: `/api/remote/{connect,status,trust-host,auth-status,copy-auth,sessions,models,model,create,delete,attach,prompt,abort,compact,state,history,events,disconnect}`.
+Endpoints: `/api/remote/{connect,status,trust-host,auth-status,copy-auth,sessions,models,model,create,delete,attach,prompt,abort,compact,state,history,events,disconnect,stop}`.
 Events are long-polled with a sequence number and an epoch (`?after=<seq>&epoch=<id>`);
 several clients can read the same session, a lost response is fetched again,
 and a client that fell behind or saw a daemon restart gets `reset` and reloads
@@ -135,6 +135,7 @@ Each sensitive step asks first.
 | **SSH trust + auth.json** | host has no `~/.pi/agent/auth.json` | yes — verify and persist the SSH fingerprint first, then **red warning** before copying API keys / OAuth tokens (mode 600) |
 | **pi-serverd** (Remote page) | no daemon running | no — installs and starts it |
 | **pi-serverd update** | daemon running, files differ from the phone's | yes — the daemon restarts, running work is interrupted (durable sessions resume) |
+| **pi-serverd stop** | **stop server** button next to connect | yes — confirm dialog; aborts running work, disconnects this device, works without an active connection (durable sessions are kept; the next connect starts and, if needed, updates the daemon) |
 | **pi** (pi CLI ssh) | `pi` not found on the host | no — installs the latest release |
 | **pi update** (pi CLI ssh) | `pi` version < npm latest | no — updates to latest, falls back to existing on failure |
 
@@ -148,6 +149,11 @@ apt / dnf / yum / pacman / apk / zypper / brew / Termux `pkg` when running as
 root or with `sudo -n`, otherwise it falls back to `nohup setsid` (log:
 `~/.pi-mobile-remote/runtime/serverd.log`). Progress is shown in Remote
 (`/api/remote/status` → `log`).
+
+**Stopping.** `POST /api/remote/stop {target}` drops the local connection, then
+stops the daemon over SSH with the same PID-from-lock logic (TERM, then KILL
+after 10 s) and removes the `pi-serverd` tmux session. It answers
+`{ok, stopped}`; `stopped:false` means no daemon was running.
 
 **Version check.** The installed state is a SHA-256 (16 hex chars) over
 `pi-serverd.mjs`, `common.mjs`, `package.json` and `package-lock.json`, stored in
@@ -281,6 +287,8 @@ New UI design, pi update in the app, remote session rename, and various fixes.
 - Session name in the Chat header links to the Sessions page.
 - Remote page: two-row connect bar — host + connect/disconnect on the first row,
   session dropdown + ✎ ＋ ✕ ■ ⇊ on the second row.
+- **stop server** button next to connect: ends `pi-serverd` on the selected host
+  (with or without an active connection); the next connect restarts/updates it.
 - Host selection no longer auto-connects; the user clicks **connect** explicitly.
 - Cards, status dots, section headers throughout; CSS custom properties for theming.
 

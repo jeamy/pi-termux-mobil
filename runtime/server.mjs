@@ -17,7 +17,7 @@ import { watchEvents } from '@earendil-works/pi-durable';
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import { RemoteExecutionEnv } from './remote-env.mjs';
 import { attachRemote, parseSshTarget, sshHostFingerprint } from './remote-client.mjs';
-import { copyAuthTo, ensureRemoteServer, probeRemote, remoteBash, runtimeHash } from './remote-provision.mjs';
+import { copyAuthTo, ensureRemoteServer, probeRemote, remoteBash, runtimeHash, stopRemoteServer } from './remote-provision.mjs';
 import {
   acquireOwnerLock, agentOf, createCredentialStore, createModelCatalog, ensureModel, isBusy,
   openHarness, pickModel, readJson, requestIdOf, sessionStore, Subagent, whenBusyOf,
@@ -593,6 +593,13 @@ async function handleApi(req, res, url, p) {
   if (p === '/api/remote/disconnect' && req.method === 'POST') {
     await remoteState.disconnect();
     return json(res, 200, { ok: true });
+  }
+  if (p === '/api/remote/stop' && req.method === 'POST') {
+    const target = str(body.target);
+    if (!target) return json(res, 400, { error: 'target required' });
+    await remoteState.disconnect();
+    const stopped = await stopRemoteServer({ ssh: target, prefix: process.env.PREFIX || '' });
+    return json(res, 200, { ok: true, stopped });
   }
   if (p.startsWith('/api/remote/')) {
     const remote = remoteState.require();
