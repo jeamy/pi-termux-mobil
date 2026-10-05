@@ -8,34 +8,34 @@
 </head>
 <body data-page="keys">
   <header>
-    <div id="menubar"><span id="status">Accounts</span></div>
+    <div id="menubar"></div>
   </header>
   <main id="keys-page">
-    <h2>Active keys</h2>
+    <div class="section-hdr">Active credentials</div>
     <div id="key-list"></div>
-    <h2>Add API key</h2>
+    <div class="section-hdr">Add API key</div>
     <form id="add-form">
       <select id="add-provider">
-        <option value="anthropic">anthropic</option>
-        <option value="openai">openai</option>
-        <option value="google">google</option>
-        <option value="openrouter">openrouter</option>
-        <option value="mistral">mistral</option>
-        <option value="groq">groq</option>
-        <option value="deepseek">deepseek</option>
-        <option value="xai">xai</option>
-        <option value="minimax">minimax</option>
+        <option value="anthropic">Anthropic</option>
+        <option value="openai">OpenAI</option>
+        <option value="google">Google</option>
+        <option value="openrouter">OpenRouter</option>
+        <option value="mistral">Mistral</option>
+        <option value="groq">Groq</option>
+        <option value="deepseek">DeepSeek</option>
+        <option value="xai">xAI</option>
+        <option value="minimax">MiniMax</option>
         <option value="zai">zai</option>
       </select>
       <input id="add-key" type="password" placeholder="API key" autocomplete="off" required>
-      <button type="submit" id="add-btn">+ api key hinzufügen</button>
+      <button type="submit" id="add-btn">Add API key</button>
     </form>
-    <p id="msg"></p>
+    <p id="msg" class="key-empty"></p>
     <section id="oauth-box">
-      <h2>OAuth / subscription</h2>
-      <div class="hdr-btns">
+      <div class="section-hdr" style="padding-top:4px">OAuth / Subscription</div>
+      <div class="hdr-btns" style="padding:0 10px 10px;gap:8px">
         <select id="oauth-provider"></select>
-        <button id="oauth-login">sign in</button>
+        <button id="oauth-login" class="btn-primary">Sign in</button>
       </div>
       <p id="oauth-status" class="key-empty"></p>
     </section>
@@ -44,12 +44,25 @@
     <h3 id="oauth-dialog-title">Sign in</h3>
     <p id="oauth-dialog-message"></p>
     <select id="oauth-dialog-select" class="hidden"></select>
-    <input id="oauth-dialog-input" class="hidden" type="text" autocomplete="off">
+    <input  id="oauth-dialog-input"  class="hidden" type="text" autocomplete="off">
     <div class="dlg-btns">
-      <button id="oauth-dialog-cancel" type="button">cancel</button>
-      <button id="oauth-dialog-submit" type="button">continue</button>
+      <button id="oauth-dialog-cancel" type="button">Cancel</button>
+      <button id="oauth-dialog-submit" type="button" class="btn-primary">Continue</button>
     </div>
   </dialog>
+  <section id="update-box">
+    <div class="section-hdr">pi version</div>
+    <div class="card card-outline" id="update-card" style="display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span id="update-installed" style="font-family:monospace;font-size:13px">…</span>
+        <span id="update-arrow" class="hidden" style="color:var(--muted)">→</span>
+        <span id="update-latest"  class="hidden" style="font-family:monospace;font-size:13px;color:var(--success)"></span>
+        <span id="update-ok"      class="hidden" style="color:var(--success);font-size:12px">✓ up to date</span>
+        <button id="update-btn"   class="hidden btn-primary" style="margin-left:auto;padding:6px 14px;font-size:13px">Update</button>
+      </div>
+      <pre id="update-log" class="hidden" style="font-size:10px;max-height:160px;overflow-y:auto;color:var(--muted);white-space:pre-wrap;word-break:break-all;background:var(--bg);padding:8px;border-radius:var(--rad-sm)"></pre>
+    </div>
+  </section>
   <script type="module" src="keys.js"></script>
 </body>
 </html>

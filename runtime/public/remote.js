@@ -5,18 +5,20 @@ import { newRequestId, postJson, Transcript, usageText } from './transcript.js';
 
 const token = renderMenu();
 const hostSel = document.getElementById('host-select');
-const sessSel = document.getElementById('session-select');
-const modelSel = document.getElementById('model-select');
-const chat = document.getElementById('chat');
-const composer = document.getElementById('composer');
-const input = document.getElementById('input');
+const sessSel    = document.getElementById('session-select');
+const modelSel   = document.getElementById('model-select');
+const chat       = document.getElementById('chat');
+const composer   = document.getElementById('composer');
+const input      = document.getElementById('input');
 const btnConnect = document.getElementById('btn-connect');
-const btnNew = document.getElementById('btn-new-session');
-const btnDelete = document.getElementById('btn-delete-session');
-const btnAbort = document.getElementById('btn-abort');
+const btnNew     = document.getElementById('btn-new-session');
+const btnRename  = document.getElementById('btn-rename-session');
+const btnDelete  = document.getElementById('btn-delete-session');
+const btnAbort   = document.getElementById('btn-abort');
 const btnCompact = document.getElementById('btn-compact');
-const statusBar = document.getElementById('session-bar');
-const statusEl = document.getElementById('remote-status');
+const statusBar  = document.getElementById('session-bar');     // session row
+const statusBand = document.getElementById('remote-status-bar'); // status strip
+const statusEl   = document.getElementById('remote-status');
 const usageEl = document.getElementById('session-usage');
 const steerWrap = document.getElementById('steer-wrap');
 const steerBox = document.getElementById('steer');
@@ -45,6 +47,7 @@ let link = 'disconnected';
 
 function showStatus() {
   statusBar.classList.toggle('hidden', !attachedId);
+  if (statusBand) statusBand.classList.toggle('hidden', !attachedId);
   statusEl.textContent = link === 'reconnecting' ? 'reconnecting…' : busy ? 'running…' : 'idle';
 }
 
@@ -130,7 +133,7 @@ async function attachSession(id) {
   link = 'connected';
   await loadRemoteModels();
   await reloadHistory();
-  for (const b of [btnAbort, btnCompact]) b.classList.remove('hidden');
+  // session-row buttons visible as part of #session-bar
   composer.classList.remove('hidden');
   pollLoop(pollGeneration);
 }
@@ -143,9 +146,8 @@ async function showSessions(sessions, attachFirst = false) {
     o.textContent = `${s.name || s.id}${s.cwd ? ` (${s.cwd})` : ''}`;
     sessSel.appendChild(o);
   }
-  sessSel.classList.toggle('hidden', !sessions.length);
-  btnNew.classList.remove('hidden');
-  btnDelete.classList.toggle('hidden', !sessions.length);
+  btnDelete?.classList.toggle('hidden', !sessions.length);
+  btnRename?.classList.toggle('hidden', !sessions.length);
   // The first option is selected automatically by HTML but does not emit a
   // change event. Attach it explicitly so a one-session host is usable.
   if (attachFirst && sessions.length) await attachSession(sessions[0].id);
@@ -165,7 +167,7 @@ function resetUi() {
   attachedId = null;
   link = 'disconnected';
   transcript.clear();
-  for (const el of [composer, modelSel, sessSel, btnNew, btnDelete, btnAbort, btnCompact]) el.classList.add('hidden');
+  for (const el of [composer, modelSel]) el.classList.add('hidden');
   sessSel.innerHTML = '';
   setConnected(false);
   showStatus();
@@ -240,7 +242,10 @@ async function connectHost() {
 
 // Selecting a host connects through SSH and immediately fills the session
 // dropdown from that host. The button remains a manual refresh/reconnect.
-hostSel.addEventListener('change', connectHost);
+hostSel.addEventListener('change', () => {
+  // host change only resets UI; user clicks connect explicitly
+  if (connected || connecting) disconnectHost();
+});
 btnConnect.addEventListener('click', () => (connected || connecting ? disconnectHost() : connectHost()));
 
 sessSel.addEventListener('change', async () => {
@@ -255,15 +260,25 @@ modelSel.addEventListener('change', async () => {
   } catch { transcript.sys('error: invalid model selection'); }
 });
 
+btnRename?.addEventListener('click', async () => {
+  const id = sessSel.value;
+  if (!id) return;
+  const cur = sessSel.options[sessSel.selectedIndex]?.textContent || id;
+  const name = prompt('Rename session:', cur);
+  if (name === null || name === cur) return;
+  const r = await post(API.remoteRename, { id, name });
+  if (!r.ok) { transcript.sys(`error: ${r.error || 'rename failed'}`); return; }
+  sessSel.options[sessSel.selectedIndex].textContent = name || id;
+});
+
 btnNew.addEventListener('click', async () => {
   const r = await post(API.remoteCreate, {});
   if (!r.id) { transcript.sys(`error: ${r.error || 'could not create session'}`); return; }
   const o = document.createElement('option');
   o.value = r.id;
-  o.textContent = r.id;
+  o.textContent = r.name || r.id;
   sessSel.prepend(o);
   sessSel.value = r.id;
-  sessSel.classList.remove('hidden');
   await attachSession(r.id);
 });
 

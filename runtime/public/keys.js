@@ -145,3 +145,66 @@ document.getElementById('add-form').addEventListener('submit', async (e) => {
 document.getElementById('oauth-login').addEventListener('click', () => runOAuth(oauthProvider.value));
 load();
 loadOAuthProviders();
+
+// 
+// ─── pi version / update ─────────────────────────────────────────────────────
+const elInstalled = document.getElementById('update-installed');
+const elArrow     = document.getElementById('update-arrow');
+const elLatest    = document.getElementById('update-latest');
+const elOk        = document.getElementById('update-ok');
+const btnUpdate   = document.getElementById('update-btn');
+const elLog       = document.getElementById('update-log');
+
+async function checkVersion() {
+  elInstalled.textContent = 'checking…';
+  try {
+    const v = await fetch(`${API.piVersion}?token=${encodeURIComponent(token)}`).then(r => r.json());
+    elInstalled.textContent = v.installed ?? '?';
+    if (v.updateAvailable) {
+      elArrow.classList.remove('hidden');
+      elLatest.textContent = v.latest;
+      elLatest.classList.remove('hidden');
+      btnUpdate.classList.remove('hidden');
+      elOk.classList.add('hidden');
+    } else {
+      elArrow.classList.add('hidden');
+      elLatest.classList.add('hidden');
+      btnUpdate.classList.add('hidden');
+      elOk.classList.remove('hidden');
+    }
+  } catch { elInstalled.textContent = 'unavailable'; }
+}
+
+let pollTimer = null;
+function startPolling() {
+  if (pollTimer) return;
+  pollTimer = setInterval(async () => {
+    const s = await fetch(`${API.piUpdateStatus}?token=${encodeURIComponent(token)}`).then(r => r.json()).catch(() => null);
+    if (!s) return;
+    if (s.log?.length) { elLog.textContent = s.log.join('\n'); elLog.scrollTop = elLog.scrollHeight; }
+    if (s.done) {
+      clearInterval(pollTimer); pollTimer = null;
+      if (s.ok) {
+        elInstalled.textContent = s.version ?? 'updated';
+        elLog.textContent += '\nrestarting…';
+        setTimeout(() => location.reload(), 3000);
+      } else {
+        btnUpdate.textContent = 'Retry'; btnUpdate.disabled = false;
+      }
+    }
+  }, 1000);
+}
+
+btnUpdate?.addEventListener('click', async () => {
+  btnUpdate.textContent = 'updating…'; btnUpdate.disabled = true;
+  elLog.textContent = ''; elLog.classList.remove('hidden');
+  await fetch(API.piUpdate, { method: 'POST', headers: { 'x-token': token } });
+  startPolling();
+});
+
+// auto-resume polling if an update is already running (page reload during update)
+(async () => {
+  await checkVersion();
+  const s = await fetch(`${API.piUpdateStatus}?token=${encodeURIComponent(token)}`).then(r => r.json()).catch(() => null);
+  if (s?.running) { elLog.classList.remove('hidden'); btnUpdate.textContent = 'updating…'; btnUpdate.disabled = true; startPolling(); }
+})();

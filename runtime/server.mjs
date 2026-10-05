@@ -52,6 +52,39 @@ const REMOTES = {
   ...JSON.parse(process.env.PI_REMOTES || '{}'),
 };
 const MAX_BODY = 1024 * 1024;
+const PI_PKG = '@earendil-works/pi-coding-agent';
+const EARENDIL_PKGS = ['@earendil-works/pi-coding-agent','@earendil-works/pi-durable',
+  '@earendil-works/pi-ai','@earendil-works/pi-client','@earendil-works/pi-server','@earendil-works/chord'];
+function piInstalledVersion() {
+  try { return JSON.parse(readFileSync(path.join(ROOT,'node_modules',PI_PKG,'package.json'),'utf8')).version; } catch { return null; }
+}
+async function piLatestVersion() {
+  try {
+    const r = await fetch(`https://registry.npmjs.org/${PI_PKG}/latest`,{ signal: AbortSignal.timeout(8000) });
+    return (await r.json()).version ?? null;
+  } catch { return null; }
+}
+const piUpdate = { running: false, done: false, ok: false, version: null, error: null, log: [] };
+function startPiUpdate() {
+  if (piUpdate.running) return false;
+  Object.assign(piUpdate, { running: true, done: false, ok: false, version: null, error: null, log: [] });
+  const prefix = process.env.PREFIX || '';
+  const npmBin = prefix ? `${prefix}/bin/npm` : 'npm';
+  const pkgs = EARENDIL_PKGS.map(p => `${p}@latest`);
+  const child = spawn(npmBin, ['install', ...pkgs, '--no-fund', '--no-audit'], {
+    cwd: ROOT, env: { ...process.env, npm_config_cache: path.join(HOME_DIR, '.npm') },
+  });
+  const addLog = (d) => { for (const l of String(d).split('\n')) { const t = l.trimEnd(); if (t) { piUpdate.log.push(t); if (piUpdate.log.length > 500) piUpdate.log.shift(); } } };
+  child.stdout.on('data', addLog); child.stderr.on('data', addLog);
+  child.on('close', (code) => {
+    piUpdate.running = false; piUpdate.done = true;
+    piUpdate.ok = code === 0; piUpdate.version = piInstalledVersion();
+    piUpdate.error = code !== 0 ? `npm exited with code ${code}` : null;
+    if (code === 0) { addLog(`pi updated to ${piUpdate.version} — restarting bridge…`); setTimeout(() => process.exit(0), 1500); }
+  });
+  child.on('error', (e) => { piUpdate.running = false; piUpdate.done = true; piUpdate.ok = false; piUpdate.error = e.message; });
+  return true;
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css',
@@ -358,6 +391,18 @@ async function handleApi(req, res, url, p) {
     throw Object.assign(new Error('harness not ready'), { status: 503 });
   }
 
+  if (p === '/api/pi-version' && req.method === 'GET') {
+    const installed = piInstalledVersion();
+    const latest = await piLatestVersion();
+    const semverGt = (a, b) => { if (!a || !b) return false; const p = (v) => v.split('.').map(Number); const [A,B] = [p(a),p(b)]; for (let i=0;i<3;i++) { if ((B[i]||0) > (A[i]||0)) return true; if ((B[i]||0) < (A[i]||0)) return false; } return false; };
+    return json(res, 200, { installed, latest, updateAvailable: semverGt(installed, latest) });
+  }
+  if (p === '/api/pi-update' && req.method === 'POST') {
+    return json(res, 200, { started: startPiUpdate() });
+  }
+  if (p === '/api/pi-update-status' && req.method === 'GET') {
+    return json(res, 200, piUpdate);
+  }
   if (p === '/api/state') return json(res, 200, await activeState());
 
   // --- local sessions
@@ -548,6 +593,8 @@ async function handleApi(req, res, url, p) {
         if (!body.provider || !body.modelId) return json(res, 400, { error: 'provider+modelId required' });
         return json(res, 200, await remote.request('configure', [{ model: { provider: str(body.provider), modelId: str(body.modelId) } }]));
       case 'POST /api/remote/create': return json(res, 200, await remote.create({ name: str(body.name, 100) || undefined }));
+      case 'POST /api/remote/rename':
+        return json(res, 200, await remote.request('rename', [str(body.id), str(body.name, 100)]));
       case 'POST /api/remote/delete':
         if (str(body.id) === remoteState.sessionId) remoteState.sessionId = null;
         return json(res, 200, await remote.delete(str(body.id)));
@@ -651,7 +698,8 @@ const server = http.createServer(async (req, res) => {
       return await handleApi(req, res, url, p);
     } catch (e) {
       if (res.headersSent) { try { res.end(); } catch {} return; }
-      return json(res, e?.status || 500, { error: String(e?.message || e), reconnecting: e?.reconnecting || undefined });
+      const httpCode = (Number.isInteger(e?.status) && e.status >= 100 && e.status <= 599) ? e.status : 500;
+      return json(res, httpCode, { error: String(e?.message || e), reconnecting: e?.reconnecting || undefined });
     }
   }
 

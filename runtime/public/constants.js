@@ -1,4 +1,7 @@
 export const API = {
+  piVersion:      '/api/pi-version',
+  piUpdate:       '/api/pi-update',
+  piUpdateStatus: '/api/pi-update-status',
   events: '/api/events',
   state: '/api/state',
   prompt: '/api/prompt',
@@ -28,6 +31,7 @@ export const API = {
   remoteModel: '/api/remote/model',
   remoteCreate: '/api/remote/create',
   remoteDelete: '/api/remote/delete',
+  remoteRename: '/api/remote/rename',
   remoteAttach: '/api/remote/attach',
   remotePrompt: '/api/remote/prompt',
   remoteAbort: '/api/remote/abort',

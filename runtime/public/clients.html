@@ -8,24 +8,30 @@
 </head>
 <body data-page="clients">
   <header>
-    <div id="menubar"><span id="status">clients</span></div>
+    <div id="menubar"></div>
   </header>
   <main id="keys-page">
-    <h2>SSH key (this device)</h2>
+    <div class="section-hdr">SSH key (this device)</div>
     <div id="sshkey-box">
-      <div id="sshkey-status">…</div>
-      <pre id="sshkey-pub" class="hidden"></pre>
-      <button id="sshkey-gen" class="hidden">generate key</button>
+      <div class="card card-outline">
+        <div class="card-row">
+          <span id="sshkey-status" style="flex:1;font-size:13px">…</span>
+          <button id="sshkey-gen" class="hidden btn-primary" style="font-size:13px;padding:6px 14px">generate</button>
+        </div>
+        <pre id="sshkey-pub" class="hidden" style="margin-top:10px"></pre>
+      </div>
     </div>
-    <h2>Remote hosts</h2>
+    <div class="section-hdr">
+      Remote hosts
+      <button id="add-toggle" class="btn-primary">＋ add</button>
+    </div>
     <div id="client-list"></div>
-    <h2>Add client</h2>
-    <form id="add-form">
-      <input id="add-name" placeholder="name (optional)" autocomplete="off">
-      <input id="add-target" placeholder="user@host[:port]" autocomplete="off" required>
-      <button type="submit" id="add-btn">+ add client</button>
+    <form id="add-form" class="hidden" style="padding:0 10px 16px">
+      <input id="add-name"   placeholder="name (optional)"       autocomplete="off">
+      <input id="add-target" placeholder="user@host[:port]"      autocomplete="off" required>
+      <button type="submit" id="add-btn">add host</button>
     </form>
-    <p id="msg"></p>
+    <p id="msg" class="key-empty"></p>
   </main>
   <script type="module" src="clients.js"></script>
 </body>

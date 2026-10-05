@@ -186,6 +186,13 @@ const host = {
               await presentation.attachSession(id, c);
               return { ok: true };
             }
+            case 'rename': {
+              const id = String(call.args[0]);
+              const name = typeof call.args[1] === 'string' ? call.args[1].slice(0, 100) : undefined;
+              if (!(await sessions.get(id))) throw new Error(`unknown session: ${id}`);
+              await sessions.update(id, { name: name || undefined });
+              return { ok: true };
+            }
             default:
               throw new Error(`unknown member: ${call.member}`);
           }

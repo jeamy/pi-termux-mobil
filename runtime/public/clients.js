@@ -5,6 +5,10 @@ const token = renderMenu();
 const q = (p) => `${p}?token=${encodeURIComponent(token)}`;
 const list = document.getElementById('client-list');
 const msg = document.getElementById('msg');
+const addForm = document.getElementById('add-form');
+document.getElementById('add-toggle')?.addEventListener('click', () => {
+  addForm.classList.toggle('hidden');
+});
 
 const post = (path, body) => fetch(path, {
   method: 'POST',
@@ -90,7 +94,8 @@ document.getElementById('add-form').addEventListener('submit', async (e) => {
   document.getElementById('add-name').value = '';
   document.getElementById('add-target').value = '';
   load();
-  // auto-flow: ensure a key exists, then open interactive ssh-copy-id
+  addForm.classList.add('hidden');
+  // auto-flow: ensure key exists, then offer interactive ssh-copy-id
   const k = await fetch(`${API.sshkey}?token=${encodeURIComponent(token)}`).then((x) => x.json());
   if (!k.exists) await post(API.sshkey, {});
   location.href = `/terminal.html?token=${encodeURIComponent(token)}&ssh=${encodeURIComponent(target)}&sshop=copyid`;

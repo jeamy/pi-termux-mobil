@@ -1,6 +1,7 @@
 // Provision the remote daemon over key-authenticated SSH. A complete release is
 // staged before stopping the old daemon; failed starts roll back to the prior release.
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { createGzip } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -144,8 +145,22 @@ export async function ensureRemoteServer({ ssh, prefix = '', log = () => {}, cop
   try {
     if (outdated) {
       log(`staging pi-serverd ${want}…`);
-      const tar = execFileSync('tar', ['czf', '-', ...REMOTE_FILES], { cwd: ROOT, maxBuffer: 2 * 1024 * 1024 });
-      const uploaded = await run(`umask 077; mkdir -p "${base}" && rm -rf "${stage}" && mkdir "${stage}" && tar xzf - -C "${stage}"`, { stdin: tar });
+      // build gzip tar in-process: avoids spawning external gzip (fails in Android sandbox)
+      const tarBuf = await new Promise((resolve, reject) => {
+        const chunks = [];
+        const gz = createGzip();
+        gz.on('data', (d) => chunks.push(d));
+        gz.on('end',  () => resolve(Buffer.concat(chunks)));
+        gz.on('error', reject);
+        const tarBin = prefix ? `${prefix}/bin/tar` : 'tar';
+        const t = spawn(tarBin, ['cf', '-', ...REMOTE_FILES], { cwd: ROOT });
+        t.stdout.pipe(gz);
+        let tarErr = '';
+        t.stderr.on('data', (d) => { tarErr += d; });
+        t.on('error', reject);
+        t.on('close', (code) => { if (code !== 0) { gz.destroy(); reject(new Error(`tar failed (${code}): ${tarErr.trim()}`)); } });
+      });
+      const uploaded = await run(`umask 077; mkdir -p "${base}" && rm -rf "${stage}" && mkdir "${stage}" && tar xzf - -C "${stage}"`, { stdin: tarBuf });
       if (uploaded.code !== 0) throw new Error(`upload failed: ${uploaded.err}`);
       staged = true;
       if (info.deps === deps && info.nm === '1') {

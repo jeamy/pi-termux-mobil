@@ -9,24 +9,37 @@
 <body data-page="remote">
   <header>
     <div id="menubar">
-      <select id="model-select" title="Remote model" class="hidden"></select>
+      <select id="model-select" title="Model" class="hidden"></select>
     </div>
   </header>
+
+  <!-- Row 1: host selector + connect/disconnect (always visible) -->
   <div id="connect-bar">
-    <select id="host-select" title="Host"><option value="">— host —</option></select>
-    <select id="session-select" title="Session" class="hidden"></select>
+    <select id="host-select" title="Host"><option value="">— select host —</option></select>
     <button id="btn-connect">connect</button>
-    <button id="btn-new-session" class="hidden" title="New session">+</button>
-    <button id="btn-delete-session" class="hidden" title="Remove session">✕</button>
-    <button id="btn-abort" class="hidden" title="Abort running work">■</button>
-    <button id="btn-compact" class="hidden" title="Compact context">⇊</button>
   </div>
-  <div id="session-bar" class="hidden"><span id="remote-status"></span> <span id="session-usage"></span></div>
+
+  <!-- Row 2: session selector + actions (visible when connected) -->
+  <div id="session-bar" class="hidden">
+    <select id="session-select" title="Session"></select>
+    <button id="btn-rename-session" class="btn-icon" title="Rename session">✎</button>
+    <button id="btn-new-session"    class="btn-icon" title="New session">＋</button>
+    <button id="btn-delete-session" class="btn-icon" title="Remove session">✕</button>
+    <button id="btn-abort"          class="btn-icon" title="Abort running work">■</button>
+    <button id="btn-compact"        class="btn-icon" title="Compact context">⇊</button>
+  </div>
+
+  <!-- Status strip -->
+  <div id="remote-status-bar" class="hidden">
+    <span id="remote-status"></span>
+    <span id="session-usage"></span>
+  </div>
+
   <main id="chat"></main>
   <form id="composer" class="hidden">
     <textarea id="input" rows="2" placeholder="Prompt…" autocomplete="off"></textarea>
-    <label id="steer-wrap" class="hidden" title="Steer the running work instead of queueing a follow-up"><input type="checkbox" id="steer"> steer</label>
-    <button type="submit">➤</button>
+    <label id="steer-wrap" class="hidden" title="Steer running work"><input type="checkbox" id="steer"> steer</label>
+    <button type="submit">↑</button>
   </form>
   <script type="module" src="remote.js"></script>
 </body>

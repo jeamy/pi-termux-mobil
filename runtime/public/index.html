@@ -11,14 +11,24 @@
     <div id="menubar">
       <span id="status">connecting…</span>
       <select id="model-select" title="Model"><option value="">no model</option></select>
+      <div class="hdr-actions">
+        <button id="btn-new"     class="btn-icon" title="New session">＋</button>
+        <button id="btn-compact" class="btn-icon" title="Compact context">⇊</button>
+        <button id="btn-abort"   class="btn-icon hidden" title="Abort">■</button>
+      </div>
     </div>
   </header>
-  <div id="session-bar">Session: <strong id="session-name">Main</strong> <span id="session-usage"></span></div>
+  <div id="session-bar">
+    <a id="session-link" href="sessions.html" title="Manage sessions">
+      <span id="session-name">Main</span>
+    </a>
+    <span id="session-usage"></span>
+    <label id="steer-wrap" class="hidden" title="Steer running work"><input type="checkbox" id="steer"> steer</label>
+  </div>
   <main id="chat"></main>
   <form id="composer">
-    <textarea id="input" rows="2" placeholder="Prompt…" autocomplete="off"></textarea>
-    <label id="steer-wrap" class="hidden" title="Steer the running work instead of queueing a follow-up"><input type="checkbox" id="steer"> steer</label>
-    <button type="submit">➤</button>
+    <textarea id="input" rows="2" placeholder="Message…" autocomplete="off"></textarea>
+    <button type="submit">↑</button>
   </form>
   <script type="module" src="app.js"></script>
 </body>

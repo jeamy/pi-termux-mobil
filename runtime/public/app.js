@@ -8,10 +8,14 @@ const chat = document.getElementById('chat');
 const input = document.getElementById('input');
 const statusEl = document.getElementById('status');
 const sessionNameEl = document.getElementById('session-name');
+const sessionLink = document.getElementById('session-link');
 const usageEl = document.getElementById('session-usage');
 const steerWrap = document.getElementById('steer-wrap');
 const steerBox = document.getElementById('steer');
 const modelSelect = document.getElementById('model-select');
+const btnAbort   = document.getElementById('btn-abort');
+const btnCompact = document.getElementById('btn-compact');
+const btnNew     = document.getElementById('btn-new');
 
 let busy = false;
 let queued = 0;
@@ -24,7 +28,7 @@ function showBusy() {
 }
 
 const transcript = new Transcript(chat, {
-  onBusy: (b) => { busy = b; showBusy(); },
+  onBusy: (b) => { busy = b; if (btnAbort) btnAbort.classList.toggle('hidden', !b); showBusy(); },
   onModel: (m) => { currentModel = m; syncModelSelect(); },
   onUsage: (u) => { usageEl.textContent = usageText(u); },
   onInbox: (items) => { queued = items.length; showBusy(); },
@@ -39,6 +43,7 @@ function connect() {
     try { ev = JSON.parse(e.data); } catch { return; }
     if (ev.type === 'bridge_snapshot') {
       sessionNameEl.textContent = ev.sessionName || 'Main';
+      if (sessionLink) sessionLink.href = `sessions.html?token=${encodeURIComponent(token)}`;
       transcript.renderSnapshot(ev.snapshot);
     } else if (ev.type === 'bridge_error') {
       transcript.sys(`error: ${ev.error}`);
@@ -100,6 +105,21 @@ modelSelect.addEventListener('change', async () => {
   if (!modelId) return;
   const r = await postJson(API.model, token, { provider, modelId });
   if (!r.ok) transcript.sys(`error: ${r.error}`);
+});
+
+// ── Header action buttons ────────────────────────────────────────────────
+const post1 = (url) => fetch(url, { method: 'POST', headers: { 'x-token': token } });
+if (btnAbort)   btnAbort.addEventListener('click',   () => post1(API.abort));
+if (btnCompact) btnCompact.addEventListener('click', async () => {
+  const r = await postJson(API.compact, token, {});
+  if (!r.ok && r.error) transcript.sys(`error: ${r.error}`);
+});
+if (btnNew) btnNew.addEventListener('click', async () => {
+  const name = prompt('Session name (optional):') ?? null;
+  if (name === null) return;
+  const r = await postJson(API.sessionNew, token, { name });
+  if (r.ok) location.href = `/?token=${encodeURIComponent(token)}`;
+  else transcript.sys(`error: ${r.error}`);
 });
 
 connect();
