@@ -69,9 +69,19 @@ function startPiUpdate() {
   if (piUpdate.running) return false;
   Object.assign(piUpdate, { running: true, done: false, ok: false, version: null, error: null, log: [] });
   const prefix = process.env.PREFIX || '';
-  const npmBin = prefix ? `${prefix}/bin/npm` : 'npm';
+  // Run npm via node to avoid Termux shebang incompatibility on Android.
+  // Try: node <npm-cli.js>, fallback to direct npm binary.
+  const nodeBin = process.execPath;
+  const npmCli = prefix ? `${prefix}/lib/node_modules/npm/bin/npm-cli.js` : null;
+  let spawnArgs;
+  if (npmCli && existsSync(npmCli)) {
+    spawnArgs = [nodeBin, [npmCli, 'install']];
+  } else {
+    const npmBin = prefix ? `${prefix}/bin/npm` : 'npm';
+    spawnArgs = [npmBin, ['install']];
+  }
   const pkgs = EARENDIL_PKGS.map(p => `${p}@latest`);
-  const child = spawn(npmBin, ['install', ...pkgs, '--no-fund', '--no-audit'], {
+  const child = spawn(spawnArgs[0], [...spawnArgs[1], ...pkgs, '--no-fund', '--no-audit', '--ignore-scripts'], {
     cwd: ROOT, env: { ...process.env, npm_config_cache: path.join(HOME_DIR, '.npm') },
   });
   const addLog = (d) => { for (const l of String(d).split('\n')) { const t = l.trimEnd(); if (t) { piUpdate.log.push(t); if (piUpdate.log.length > 500) piUpdate.log.shift(); } } };

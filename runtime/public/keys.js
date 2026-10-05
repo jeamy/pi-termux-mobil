@@ -184,11 +184,16 @@ function startPolling() {
     if (s.log?.length) { elLog.textContent = s.log.join('\n'); elLog.scrollTop = elLog.scrollHeight; }
     if (s.done) {
       clearInterval(pollTimer); pollTimer = null;
+      elLog.classList.remove('hidden');
       if (s.ok) {
         elInstalled.textContent = s.version ?? 'updated';
         elLog.textContent += '\nrestarting…';
+        elArrow.classList.add('hidden'); elLatest.classList.add('hidden');
+        btnUpdate.classList.add('hidden'); elOk.classList.remove('hidden');
         setTimeout(() => location.reload(), 3000);
       } else {
+        if (s.error) elLog.textContent += `\n✕ ${s.error}`;
+        elLog.scrollTop = elLog.scrollHeight;
         btnUpdate.textContent = 'Retry'; btnUpdate.disabled = false;
       }
     }

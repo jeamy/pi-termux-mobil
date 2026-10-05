@@ -4,7 +4,7 @@
 > development. Remote sessions, the embedded Termux runtime, and Android
 > background-process handling may still change or fail on individual devices.
 >
-> **Version 0.0.4** — still quick & dirty, see the [changelog](#changelog).
+> **Version 0.0.5** — still quick & dirty, see the [changelog](#changelog).
 
 Minimal Android app that embeds Termux-built binaries (Node.js 26.4.0, bash,
 coreutils, git, ripgrep, fd, openssh, npm, util-linux `script`, …) plus a
@@ -136,6 +136,7 @@ Each sensitive step asks first.
 | **pi-serverd** (Remote page) | no daemon running | no — installs and starts it |
 | **pi-serverd update** | daemon running, files differ from the phone's | yes — the daemon restarts, running work is interrupted (durable sessions resume) |
 | **pi** (pi CLI ssh) | `pi` not found on the host | no — installs the latest release |
+| **pi update** (pi CLI ssh) | `pi` version < npm latest | no — updates to latest, falls back to existing on failure |
 
 **pi-serverd.** A new release is unpacked and dependency-checked in a private
 staging directory first. Only after that succeeds is the daemon stopped and the
@@ -267,6 +268,47 @@ Caveats on device:
 See ANALYSE.md for the full evaluation and upstream facts.
 
 ## Changelog
+
+### 0.0.5 — 2026-10-05
+
+New UI design, pi update in the app, remote session rename, and various fixes.
+
+**UI redesign**
+
+- Hamburger menu replaced by a **bottom tab bar** (Chat · Remote · CLI · Clients · Keys).
+- On the Terminal page a **≡ slide-up sheet** replaces the menu.
+- Chat header: inline **＋ / ⇊ / ■** buttons (new session, compact, abort).
+- Session name in the Chat header links to the Sessions page.
+- Remote page: two-row connect bar — host + connect/disconnect on the first row,
+  session dropdown + ✎ ＋ ✕ ■ ⇊ on the second row.
+- Host selection no longer auto-connects; the user clicks **connect** explicitly.
+- Cards, status dots, section headers throughout; CSS custom properties for theming.
+
+**pi update in the app (Accounts page)**
+
+- Shows the installed pi version and checks npm for a newer release.
+- **Update** button runs `npm install @earendil-works/*@latest` directly on the
+  phone (via `node npm-cli.js`, bypassing the Termux shebang issue).
+- npm install uses `--ignore-scripts` to skip esbuild postinstall failures on Android.
+- Progress streams line by line; on failure the npm output and error are shown.
+- Bridge restarts automatically after a successful update.
+
+**Remote: session rename**
+
+- Added **✎** rename button on the Remote session row.
+- `pi-serverd.mjs` now handles the `sessions.rename` member of the sessions service.
+
+**Fixes**
+
+- Remote connect bar no longer auto-connects on host dropdown change.
+- `npm install` on the phone now uses `node npm-cli.js` instead of the Termux
+  shell-script npm wrapper (which has a Termux-specific shebang and fails in-app).
+- Status code `2` (tar/npm exit code) no longer crashes the HTTP server.
+- Node >= 22.19.0 required (matches upstream `pi-coding-agent` / `pi-durable`).
+
+**Dependencies**
+
+- All `@earendil-works/*` packages bumped to `^1.0.3` in `package.json`.
 
 ### 0.0.4 — 2026-10-05
 
