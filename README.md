@@ -49,10 +49,15 @@ Screenshots from a phone (SSH key and host addresses blacked out).
 | <img src="docs/screens/chat.png" width="260" alt="Chat page"> | <img src="docs/screens/remote.png" width="260" alt="Remote page connected to a host"> |
 | Local conversation running on the phone (durable: SQLite-backed, survives process death), with model dropdown, session name, token/cost counter and new / compact buttons. | Host selector with **connect/disconnect** and **stop server**, remote session dropdown (rename, new, remove, abort, compact) and a conversation that runs in `pi-serverd` on the host (also durable, stored there; the phone is only the client and re-attaches after a lost connection). |
 
-| pi CLI | Clients |
+| pi CLI (local) | pi CLI (ssh) |
 |---|---|
-| <img src="docs/screens/pi-cli.png" width="260" alt="pi CLI terminal"> | <img src="docs/screens/clients.png" width="260" alt="Clients page"> |
-| Full interactive pi TUI in the built-in terminal, with an esc / ctrl / arrow key row. | SSH key of this device and the list of remote hosts, each with terminal, key-install and remove buttons. |
+| <img src="docs/screens/pi-cli.png" width="260" alt="pi CLI terminal"> | <img src="docs/screens/pi-cli-ssh.png" width="260" alt="pi CLI over ssh on a remote host"> |
+| Full interactive pi TUI in the built-in terminal, running on the phone, with an esc / ctrl / arrow key row. | The same full pi TUI, but running on the remote host over SSH (here: "wo bin ich?" answers `/home/lux`, and `ip` lists the host's addresses). Pick the host on the Clients page with its **▸_** button. |
+
+| Clients |
+|---|
+| <img src="docs/screens/clients.png" width="260" alt="Clients page"> |
+| SSH key of this device and the list of remote hosts, each with terminal (**▸_**, starts pi CLI ssh), key-install and remove buttons. |
 
 ## Accounts: API keys and OAuth
 
