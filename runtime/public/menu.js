@@ -54,7 +54,7 @@ export function renderMenu() {
   document.addEventListener('click', () => menu.classList.add('hidden'));
   menu.querySelector('#menu-ssh').addEventListener('click', (e) => {
     e.preventDefault();
-    const target = prompt('ssh target (user@host[:port], pi must be installed there):',
+    const target = prompt('ssh target (user@host[:port], pi is installed/updated automatically):',
       localStorage.getItem('pi-ssh-target') || '');
     if (!target) return;
     localStorage.setItem('pi-ssh-target', target);

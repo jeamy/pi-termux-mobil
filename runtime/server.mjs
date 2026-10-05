@@ -672,14 +672,22 @@ const clampInt = (v, lo, hi, dflt) => {
   return Number.isFinite(n) && n >= lo && n <= hi ? n : dflt;
 };
 
-// Remote command for "pi CLI (ssh)": login shell + node-version-manager PATH setup; when `pi`
-// is missing but npm exists, install the latest release into ~/.local (no root needed).
+// Remote command for "pi CLI (ssh)": install pi if absent, otherwise compare it
+// to npm's latest stable release and update only when newer. The update stays in
+// ~/.local (no root); if npm/the registry is unreachable the existing pi starts.
 const REMOTE_PI_SCRIPT = [
+  'PKG=@earendil-works/pi-coding-agent;',
   'if ! command -v pi >/dev/null 2>&1; then',
+  ' if ! command -v npm >/dev/null 2>&1; then echo "pi is missing; npm (and Node.js >= 22.19.0) is required."; read -r _; exit 1; fi;',
+  ' echo "pi not found - installing latest $PKG into ~/.local ...";',
+  ' npm install -g --prefix "$HOME/.local" "$PKG@latest" || { echo "pi installation failed"; read -r _; exit 1; };',
+  'else',
   ' if command -v npm >/dev/null 2>&1; then',
-  '  echo "pi not found on this host - installing the latest @earendil-works/pi-coding-agent into ~/.local ...";',
-  '  npm install -g --prefix "$HOME/.local" @earendil-works/pi-coding-agent@latest || { read -r _; exit 1; };',
-  ' else echo "pi and npm are not installed or not in PATH on this host (Node.js >= 22 + npm required)."; echo "PATH=$PATH"; read -r _; exit 1; fi;',
+  '  have=$(pi --version 2>/dev/null | head -n 1); latest=$(npm view "$PKG" version --fetch-timeout=10000 --fetch-retries=1 2>/dev/null | head -n 1);',
+  '  if [ -n "$latest" ] && node -e "const p=s=>String(s).match(/^([0-9]+)\\.([0-9]+)\\.([0-9]+)/)?.slice(1).map(Number); const [a,b]=process.argv.slice(1).map(p); let c=0; if(a&&b) for(let i=0;i<3;i++) if(a[i]!==b[i]) { c=b[i]-a[i]; break; } process.exit(c>0?0:1)" "$have" "$latest"; then',
+  '   echo "updating pi: $have -> $latest ..."; npm install -g --prefix "$HOME/.local" "$PKG@latest" || echo "pi update failed; starting $have";',
+  '  elif [ -z "$latest" ]; then echo "could not check for pi updates; starting $have"; fi;',
+  ' fi;',
   'fi;',
   'exec pi',
 ].join(' ');

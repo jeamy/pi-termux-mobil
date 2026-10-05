@@ -4,7 +4,7 @@
 > development. Remote sessions, the embedded Termux runtime, and Android
 > background-process handling may still change or fail on individual devices.
 >
-> **Version 0.0.3** — still quick & dirty, see the [changelog](#changelog).
+> **Version 0.0.4** — still quick & dirty, see the [changelog](#changelog).
 
 Minimal Android app that embeds Termux-built binaries (Node.js 26.4.0, bash,
 coreutils, git, ripgrep, fd, openssh, npm, util-linux `script`, …) plus a
@@ -158,7 +158,10 @@ the old daemon.
 is missing and npm exists, the latest `@earendil-works/pi-coding-agent` is
 installed with `npm install -g --prefix ~/.local` (no root; `~/.local/bin` is put
 in front of `PATH`) and started; the installation output is visible in the terminal.
-An installed `pi` is never updated automatically.
+Before every SSH-TUI start, the installed version is compared to `npm view`
+(`@earendil-works/pi-coding-agent@latest`) and is updated only when the registry
+has a newer stable semantic version. If npm/the registry is unavailable or an
+update fails, the installed pi starts unchanged.
 
 **Node.** Node.js **>= 22.19.0** and npm must already exist on the host and are *not*
 installed automatically. This exact minimum comes from the bundled
@@ -264,6 +267,12 @@ Caveats on device:
 See ANALYSE.md for the full evaluation and upstream facts.
 
 ## Changelog
+
+### 0.0.4 — 2026-10-05
+
+- **pi CLI (ssh):** compares `pi --version` with the current npm release before
+  starting. A newer `@earendil-works/pi-coding-agent` is installed to `~/.local`.
+  Registry-check and update failures leave the installed pi usable.
 
 ### 0.0.3 — 2026-10-05
 
