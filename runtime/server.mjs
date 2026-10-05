@@ -16,7 +16,7 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { watchEvents } from '@earendil-works/pi-durable';
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import { RemoteExecutionEnv } from './remote-env.mjs';
-import { attachRemote, parseSshTarget } from './remote-client.mjs';
+import { attachRemote, parseSshTarget, sshHostFingerprint } from './remote-client.mjs';
 import { copyAuthTo, ensureRemoteServer, probeRemote, remoteBash, runtimeHash } from './remote-provision.mjs';
 import {
   acquireOwnerLock, agentOf, createCredentialStore, createModelCatalog, ensureModel, isBusy,
@@ -36,6 +36,16 @@ const TOKEN_FILE = path.join(STATE_DIR, 'token');
 const LEGACY_SESSIONS_FILE = path.join(STATE_DIR, 'sessions.json');
 const DEVICE_ID_FILE = path.join(STATE_DIR, 'device-id');
 const CLIENTS_FILE = path.join(STATE_DIR, 'clients.json');
+const TRUST_FILE = path.join(STATE_DIR, 'trusted-hosts.json');
+async function trustStatus(target) {
+  parseSshTarget(target);
+  const fingerprint = await sshHostFingerprint(target, process.env.PREFIX || '');
+  if (!fingerprint) throw new Error('SSH host fingerprint not available: cannot transfer credentials');
+  return { fingerprint, trusted: readJson(TRUST_FILE, {})[target] === fingerprint };
+}
+async function assertTrusted(target) {
+  if (!(await trustStatus(target)).trusted) throw Object.assign(new Error('confirm the SSH host fingerprint before copying credentials'), { status: 403 });
+}
 const PUBLIC = path.join(ROOT, 'public');
 const REMOTES = {
   ...readJson(path.join(STATE_DIR, 'remotes.json'), {}),
@@ -248,21 +258,28 @@ const remoteState = {
   status: 'disconnected', // connected | reconnecting | disconnected
   lastError: null,
   log: [],
+  generation: 0,
   async connect(target, { copyAuth = false, allowUpdate = false } = {}) {
     await this.disconnect();
+    const generation = this.generation;
     const prefix = process.env.PREFIX || '';
     // make sure a pi-serverd runs there (installs + starts it in tmux if not)
     this.log = [];
     this.status = 'provisioning';
     this.lastError = null;
     try {
+      if (copyAuth) await assertTrusted(target);
       await ensureRemoteServer({ ssh: target, prefix, copyAuth, allowUpdate, authFile: AUTH_PATH, log: (l) => { this.log.push(l); if (this.log.length > 200) this.log.shift(); } });
     } catch (e) {
       this.status = 'disconnected';
       this.lastError = String(e?.message || e);
       throw e;
     }
-    const remote = await attachRemote({ ssh: target, prefix, socketDir: path.join(STATE_DIR, 'tunnels') });
+    if (generation !== this.generation) throw Object.assign(new Error('connection cancelled'), { status: 409 });
+    let remote;
+    try { remote = await attachRemote({ ssh: target, prefix, socketDir: path.join(STATE_DIR, 'tunnels') }); }
+    catch (e) { this.status = 'disconnected'; this.lastError = String(e?.message || e); throw e; }
+    if (generation !== this.generation) { await remote.disconnect(); throw Object.assign(new Error('connection cancelled'), { status: 409 }); }
     this.remote = remote;
     this.status = 'connected';
     remote.onLost((why) => this.recover(remote, why));
@@ -287,6 +304,7 @@ const remoteState = {
     }
   },
   async disconnect() {
+    this.generation++;
     const r = this.remote;
     this.remote = null;
     this.sessionId = null;
@@ -466,6 +484,13 @@ async function handleApi(req, res, url, p) {
   }
 
   // --- remote pi-server attach
+  if (p === '/api/remote/trust-host' && req.method === 'POST') {
+    const target = str(body.target);
+    const { fingerprint } = await trustStatus(target);
+    if (body.fingerprint !== fingerprint) return json(res, 409, { error: 'host fingerprint changed' });
+    writeFileAtomic(TRUST_FILE, JSON.stringify({ ...readJson(TRUST_FILE, {}), [target]: fingerprint }), 0o600);
+    return json(res, 200, { ok: true });
+  }
   if (p === '/api/remote/auth-status' && req.method === 'POST') {
     let info;
     try { info = await probeRemote({ ssh: str(body.target), prefix: process.env.PREFIX || '' }); } catch (e) {
@@ -473,10 +498,14 @@ async function handleApi(req, res, url, p) {
       const loginFailed = /ssh login failed/.test(String(e?.message));
       return json(res, 200, { ok: false, loginFailed, error: String(e?.message || e) });
     }
-    return json(res, 200, { ok: true, needsAuth: info.auth !== '1' && existsSync(AUTH_PATH) });
+    const trust = await trustStatus(str(body.target));
+    return json(res, 200, { ok: true, needsAuth: info.auth !== '1' && existsSync(AUTH_PATH), ...trust });
   }
   if (p === '/api/remote/copy-auth' && req.method === 'POST') {
     if (!existsSync(AUTH_PATH)) return json(res, 400, { error: 'no auth.json on this device' });
+    await assertTrusted(str(body.target));
+    const info = await probeRemote({ ssh: str(body.target), prefix: process.env.PREFIX || '' });
+    if (info.auth === '1') return json(res, 409, { error: 'auth.json already exists on host' });
     await copyAuthTo({ ssh: str(body.target), prefix: process.env.PREFIX || '', authFile: AUTH_PATH });
     return json(res, 200, { ok: true });
   }
@@ -491,7 +520,11 @@ async function handleApi(req, res, url, p) {
         const msg = String(e?.message || e);
         return json(res, 200, { ok: false, loginFailed: /ssh login failed/.test(msg), error: msg });
       }
-      if (askAuth && info.auth !== '1') return json(res, 200, { ok: false, needsAuth: true, target });
+      if (askAuth && info.auth !== '1') {
+        const trust = await trustStatus(target);
+        if (!trust.trusted) return json(res, 200, { ok: false, needsTrust: true, target, ...trust });
+        return json(res, 200, { ok: false, needsAuth: true, target });
+      }
       if (askUpdate && info.running === '1' && info.ver !== runtimeHash()) {
         return json(res, 200, { ok: false, needsUpdate: true, target, installed: info.ver || null, available: runtimeHash() });
       }
@@ -668,7 +701,7 @@ function startPty(ws, url) {
     const portFlag = target.port ? `-p ${target.port}` : '';
     if (sshCmd === 'copyid') {
       // run ssh-copy-id inside the pty so password entry is interactive
-      inner = `stty cols ${cols} rows ${rows}; "${prefix}/bin/bash" "${prefix}/bin/ssh-copy-id" -i "$HOME/.ssh/id_ed25519" ${portFlag} -o "UserKnownHostsFile=$HOME/.ssh/known_hosts" -- "${target.host}"; echo; echo '[done — close or tap to exit]'; read -r _ 2>/dev/null`;
+      inner = `stty cols ${cols} rows ${rows}; "${prefix}/bin/bash" "${prefix}/bin/ssh-copy-id" -i "$HOME/.ssh/id_ed25519" ${portFlag} -o "UserKnownHostsFile=$HOME/.ssh/known_hosts" -- "${target.host}"; rc=$?; echo; if [ "$rc" -eq 0 ]; then echo '[SSH_KEY_INSTALLED]'; else echo "[ssh-copy-id failed: $rc]"; fi; echo '[press Enter to continue]'; read -r _ 2>/dev/null`;
     } else {
       // remote pi session over ssh (keys via $HOME/.ssh on this device)
       inner = `stty cols ${cols} rows ${rows}; exec "${prefix}/bin/ssh" -tt ${portFlag} -o "StrictHostKeyChecking=accept-new" -o "UserKnownHostsFile=$HOME/.ssh/known_hosts" -i "$HOME/.ssh/id_ed25519" -- "${target.host}" ${REMOTE_PI_CMD}`;

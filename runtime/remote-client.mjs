@@ -40,6 +40,20 @@ export function sshBaseOptions(home, port) {
     ...(port ? ['-p', String(port)] : [])];
 }
 
+export async function sshHostFingerprint(ssh, prefix = '') {
+  const { host, port } = parseSshTarget(ssh);
+  const home = process.env.HOME || '/tmp';
+  const bare = host.replace(/^.*@/, '');
+  return new Promise((resolve) => {
+    const c = spawn(`${prefix}/bin/ssh-keygen`, ['-l', '-F', port ? `[${bare}]:${port}` : bare,
+      '-f', `${home}/.ssh/known_hosts`]);
+    let out = '';
+    c.stdout.on('data', (d) => { out += d; });
+    c.on('error', () => resolve(null));
+    c.on('close', () => resolve(/(SHA256:\S+)/.exec(out)?.[1] ?? null));
+  });
+}
+
 export async function attachRemote({ ssh, prefix = '', socketDir, serverId, remoteSock }) {
   const sshBin = `${prefix}/bin/ssh`;
   const { host: sshHost, port: sshPort } = parseSshTarget(ssh);
@@ -76,15 +90,7 @@ export async function attachRemote({ ssh, prefix = '', socketDir, serverId, remo
 
   // StrictHostKeyChecking=accept-new trusts the first key it sees (TOFU):
   // report the stored fingerprint so the user can compare it once.
-  const bareHost = sshHost.replace(/^.*@/, '');
-  const hostKey = await new Promise((resolve) => {
-    const kg = spawn(`${prefix}/bin/ssh-keygen`, ['-l', '-F', sshPort ? `[${bareHost}]:${sshPort}` : bareHost,
-      '-f', `${home}/.ssh/known_hosts`], { env: process.env });
-    let out = '';
-    kg.stdout.on('data', (d) => { out += d; });
-    kg.on('exit', () => resolve(/(SHA256:\S+)/.exec(out)?.[1] ?? null));
-    kg.on('error', () => resolve(null));
-  });
+  const hostKey = await sshHostFingerprint(ssh, prefix);
 
   let tunnel = null;
   let client = null;

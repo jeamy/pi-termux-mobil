@@ -4,7 +4,7 @@
 > development. Remote sessions, the embedded Termux runtime, and Android
 > background-process handling may still change or fail on individual devices.
 >
-> **Version 0.0.2** — still quick & dirty, see the [changelog](#changelog).
+> **Version 0.0.3** — still quick & dirty, see the [changelog](#changelog).
 
 Minimal Android app that embeds Termux-built binaries (Node.js 26.4.0, bash,
 coreutils, git, ripgrep, fd, openssh, npm, util-linux `script`, …) plus a
@@ -69,7 +69,7 @@ durable Harness + own SQLite under `~/.pi-serverd/`, services
 cursor — Chord subscriptions deliberately skipped).
 
 ```bash
-# on the remote machine (Node >= 22, same runtime dir, uses ~/.pi/agent/auth.json)
+# on the remote machine (Node >= 22.19.0, same runtime dir, uses ~/.pi/agent/auth.json)
 node pi-serverd.mjs        # socket: ~/.pi-serverd/server.sock
 ```
 
@@ -87,7 +87,7 @@ session first, restores its transcript, and displays a model picker using the
 remote host's available models. Remote uses non-interactive SSH key login, so
 run **⇧key** / `ssh-copy-id` for a host before using it here.
 On connect the app checks the host and sets it up if needed — see [Remote host setup](#remote-host-setup-automatic).
-Endpoints: `/api/remote/{connect,status,sessions,models,model,create,delete,attach,prompt,abort,compact,state,history,events,disconnect}`.
+Endpoints: `/api/remote/{connect,status,trust-host,auth-status,copy-auth,sessions,models,model,create,delete,attach,prompt,abort,compact,state,history,events,disconnect}`.
 Events are long-polled with a sequence number and an epoch (`?after=<seq>&epoch=<id>`);
 several clients can read the same session, a lost response is fetched again,
 and a client that fell behind or saw a daemon restart gets `reset` and reloads
@@ -132,18 +132,20 @@ Each sensitive step asks first.
 | Step | When | Asks? |
 |---|---|---|
 | **SSH key** | host rejects the phone's ed25519 key | yes — runs `ssh-copy-id` in the terminal (password once), then returns and reconnects |
-| **auth.json** | host has no `~/.pi/agent/auth.json` | yes — **red warning**: all API keys / OAuth tokens of the phone are copied to that machine (mode 600) |
+| **SSH trust + auth.json** | host has no `~/.pi/agent/auth.json` | yes — verify and persist the SSH fingerprint first, then **red warning** before copying API keys / OAuth tokens (mode 600) |
 | **pi-serverd** (Remote page) | no daemon running | no — installs and starts it |
 | **pi-serverd update** | daemon running, files differ from the phone's | yes — the daemon restarts, running work is interrupted (durable sessions resume) |
 | **pi** (pi CLI ssh) | `pi` not found on the host | no — installs the latest release |
 
-**pi-serverd.** `runtime/remote-provision.mjs` copies `pi-serverd.mjs`, `common.mjs`
-and the package files to `~/.pi-mobile-remote/runtime`, runs `npm ci --omit=dev`
-(only when `package*.json` changed) and starts `node pi-serverd.mjs` in the tmux
-session `pi-serverd`. Missing tmux is installed through apt / dnf / yum / pacman /
-apk / zypper / brew / Termux `pkg` when running as root or with `sudo -n`;
-otherwise the daemon falls back to `nohup setsid` (log:
-`~/.pi-mobile-remote/runtime/serverd.log`). Progress is shown in the Remote page
+**pi-serverd.** A new release is unpacked and dependency-checked in a private
+staging directory first. Only after that succeeds is the daemon stopped and the
+release directory atomically swapped; a failed restart restores the preceding
+release. The daemon PID is read from its own lock file (not a global `pkill`),
+and its Unix socket plus `sessions.list` protocol call are health-checked. The
+daemon runs in the tmux session `pi-serverd`; missing tmux is installed through
+apt / dnf / yum / pacman / apk / zypper / brew / Termux `pkg` when running as
+root or with `sudo -n`, otherwise it falls back to `nohup setsid` (log:
+`~/.pi-mobile-remote/runtime/serverd.log`). Progress is shown in Remote
 (`/api/remote/status` → `log`).
 
 **Version check.** The installed state is a SHA-256 (16 hex chars) over
@@ -158,8 +160,9 @@ installed with `npm install -g --prefix ~/.local` (no root; `~/.local/bin` is pu
 in front of `PATH`) and started; the installation output is visible in the terminal.
 An installed `pi` is never updated automatically.
 
-**Node.** Node.js >= 22 and npm must already exist on the host and are *not*
-installed automatically. They are found in login shells and — because nvm, fnm,
+**Node.** Node.js **>= 22.19.0** and npm must already exist on the host and are *not*
+installed automatically. This exact minimum comes from the bundled
+`pi-coding-agent` and `pi-durable` packages; Node 22.18.x is not supported. They are found in login shells and — because nvm, fnm,
 Volta, asdf and nodenv set `PATH` in `~/.bashrc` — through a prelude that sources
 `~/.nvm/nvm.sh` and adds the usual shim directories.
 
@@ -262,6 +265,22 @@ See ANALYSE.md for the full evaluation and upstream facts.
 
 ## Changelog
 
+### 0.0.3 — 2026-10-05
+
+Hardening and correctness pass for remote provisioning.
+
+- Enforces the upstream Node engine requirement **>= 22.19.0** (rather than
+  accepting every Node 22 release).
+- `auth.json` is copied only after explicit SSH fingerprint verification and
+  the red credential warning. The saved fingerprint is checked again server-side.
+- Release updates are staged first, switched atomically, and roll back on a
+  failed start. PID-targeted shutdown replaces global `pkill`.
+- A live socket is additionally verified through `sessions.list`; unhealthy
+  daemons are restarted.
+- Failed `ssh-copy-id` no longer silently proceeds to reconnect.
+- Cancelling a Remote connection invalidates an in-flight provisioning result.
+- Adds basic Node-version, target-validation and release-hash tests.
+
 ### 0.0.2 — 2026-10-05
 
 Hosts are now prepared automatically when connecting remotely. Details:
@@ -297,8 +316,8 @@ Hosts are now prepared automatically when connecting remotely. Details:
 
 **Notes**
 
-- Node.js >= 22 + npm on the host are still required and are not installed.
-- `RUNTIME_VERSION` 44; the new `remote-provision.mjs` is part of the runtime
+- Node.js >= 22.19.0 + npm on the host are still required and are not installed.
+- `RUNTIME_VERSION` 45; the new `remote-provision.mjs` is part of the runtime
   archive (see *Repackaging assets*).
 
 ### 0.0.1 — 2026-10-04

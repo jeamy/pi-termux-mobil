@@ -1,5 +1,5 @@
 import { API } from './constants.js';
-import { askCopyAuth, askInstallKey, askUpdate } from './authprompt.js';
+import { askCopyAuth, askInstallKey, askTrustHost, askUpdate } from './authprompt.js';
 import { renderMenu } from './menu.js';
 import { newRequestId, postJson, Transcript, usageText } from './transcript.js';
 
@@ -153,6 +153,7 @@ async function showSessions(sessions, attachFirst = false) {
 
 let connecting = false;
 let connected = false;
+let connectGeneration = 0;
 
 function setConnected(v) {
   connected = v;
@@ -171,6 +172,8 @@ function resetUi() {
 }
 
 async function disconnectHost() {
+  connectGeneration++;
+  connecting = false;
   resetUi();
   const r = await post(API.remoteDisconnect, {});
   transcript.sys(r.error ? `error: ${r.error}` : 'disconnected');
@@ -180,6 +183,8 @@ async function connectHost() {
   const target = hostSel.value;
   if (!target || connecting) return;
   connecting = true;
+  const generation = ++connectGeneration;
+  btnConnect.textContent = 'cancel';
   try {
     // A connection is owned by one host. Do not leave the old host's attached
     // session, model, transcript, or composer usable while switching hosts.
@@ -196,13 +201,19 @@ async function connectHost() {
     try {
       // the bridge answers needsAuth / needsUpdate until the user decided; each answer is sent along
       const body = { target };
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < 4; i++) {
         r = await post(API.remoteConnect, body);
-        if (r.needsAuth) body.copyAuth = await askCopyAuth(target);
+        if (r.needsTrust) {
+          if (await askTrustHost(target, r.fingerprint)) {
+            const trust = await post(API.remoteTrustHost, { target, fingerprint: r.fingerprint });
+            if (!trust.ok) { r = trust; break; }
+          } else body.copyAuth = false;
+        } else if (r.needsAuth) body.copyAuth = await askCopyAuth(target);
         else if (r.needsUpdate) body.allowUpdate = await askUpdate(target, r);
         else break;
       }
     } finally { clearInterval(logTimer); }
+    if (generation !== connectGeneration) return;
     if (r.loginFailed && await askInstallKey(target)) {
       // ssh-copy-id needs a terminal for the password; the terminal page returns here afterwards
       const back = `/remote.html?token=${encodeURIComponent(token)}&host=${encodeURIComponent(target)}`;
@@ -221,15 +232,16 @@ async function connectHost() {
       sessions = [{ id: created.id }];
     }
     await showSessions(sessions, true);
-  } finally {
-    connecting = false;
+  } catch (e) { if (generation === connectGeneration) transcript.sys(`error: ${e?.message || e}`); }
+  finally {
+    if (generation === connectGeneration) { connecting = false; btnConnect.textContent = connected ? 'disconnect' : 'connect'; }
   }
 }
 
 // Selecting a host connects through SSH and immediately fills the session
 // dropdown from that host. The button remains a manual refresh/reconnect.
 hostSel.addEventListener('change', connectHost);
-btnConnect.addEventListener('click', () => (connected ? disconnectHost() : connectHost()));
+btnConnect.addEventListener('click', () => (connected || connecting ? disconnectHost() : connectHost()));
 
 sessSel.addEventListener('change', async () => {
   if (sessSel.value) await attachSession(sessSel.value);

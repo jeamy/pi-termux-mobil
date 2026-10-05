@@ -1,5 +1,5 @@
 /* global Terminal, FitAddon */
-import { askCopyAuth, askInstallKey } from './authprompt.js';
+import { askCopyAuth, askInstallKey, askTrustHost } from './authprompt.js';
 import { API } from './constants.js';
 import { renderMenu } from './menu.js';
 const token = renderMenu();
@@ -20,6 +20,8 @@ let ws;
 const sshTarget = new URLSearchParams(location.search).get('ssh');
 const sshOp = new URLSearchParams(location.search).get('sshop');
 let keyInstallRun = false; // this pty run is ssh-copy-id; afterwards the checks start again
+let keyInstallSucceeded = false;
+let keyOutputTail = '';
 function connect(op = sshOp) {
   const cols = term.cols || 120;
   const rows = term.rows || 30;
@@ -30,11 +32,21 @@ function connect(op = sshOp) {
   ws = new WebSocket(u);
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => { term.focus(); };
-  ws.onmessage = (e) => term.write(new Uint8Array(e.data));
+  ws.onmessage = (e) => {
+    const bytes = new Uint8Array(e.data);
+    keyOutputTail = (keyOutputTail + new TextDecoder().decode(bytes)).slice(-256);
+    if (keyOutputTail.includes('[SSH_KEY_INSTALLED]')) keyInstallSucceeded = true;
+    term.write(bytes);
+  };
   ws.onclose = () => {
     const next = new URLSearchParams(location.search).get('next');
-    if (sshOp === 'copyid' && next && next.startsWith('/') && !next.startsWith('//')) { location.href = next; return; }
-    if (keyInstallRun) { keyInstallRun = false; term.reset(); start(); return; }
+    if (sshOp === 'copyid' && next && next.startsWith('/') && !next.startsWith('//') && keyInstallSucceeded) { location.href = next; return; }
+    if (keyInstallRun) {
+      keyInstallRun = false;
+      if (keyInstallSucceeded) { keyInstallSucceeded = false; term.reset(); start(); return; }
+      term.write('\r\n[key installation failed — tap to retry]\r\n');
+      return;
+    }
     term.write('\r\n\r\n[disconnected — tap to respawn]\r\n');
     document.getElementById('status').textContent = 'disconnected';
   };
@@ -54,7 +66,7 @@ term.onData((d) => {
   ws.send(d);
 });
 document.getElementById('term').addEventListener('click', () => {
-  if (ws?.readyState === 3) { term.reset(); connect(); }
+  if (ws?.readyState === 3) { term.reset(); start(); }
 });
 function sendSize() {
   fit.fit();
@@ -75,9 +87,17 @@ async function start() {
         if (await askInstallKey(sshTarget)) { keyInstallRun = true; connect('copyid'); return; }
         term.write('key not installed; ssh will ask for the password.\r\n');
       } else if (st.error) term.write(`[auth check failed: ${st.error}]\r\n`);
-      else if (st.needsAuth && await askCopyAuth(sshTarget)) {
-        const r = await post(API.remoteCopyAuth, { target: sshTarget });
-        term.write(r.ok ? 'auth.json copied.\r\n' : `[copy failed: ${r.error}]\r\n`);
+      else if (st.needsAuth) {
+        let trusted = st.trusted;
+        if (!trusted && await askTrustHost(sshTarget, st.fingerprint)) {
+          const r = await post(API.remoteTrustHost, { target: sshTarget, fingerprint: st.fingerprint });
+          trusted = r.ok;
+          if (!trusted) term.write(`[fingerprint confirmation failed: ${r.error}]\r\n`);
+        }
+        if (trusted && await askCopyAuth(sshTarget)) {
+          const r = await post(API.remoteCopyAuth, { target: sshTarget });
+          term.write(r.ok ? 'auth.json copied.\r\n' : `[copy failed: ${r.error}]\r\n`);
+        }
       }
     } catch (e) { term.write(`[auth check failed: ${e?.message || e}]\r\n`); }
   }

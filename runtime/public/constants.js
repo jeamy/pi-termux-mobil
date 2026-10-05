@@ -39,4 +39,5 @@ export const API = {
   remoteDisconnect: '/api/remote/disconnect',
   remoteAuthStatus: '/api/remote/auth-status',
   remoteCopyAuth: '/api/remote/copy-auth',
+  remoteTrustHost: '/api/remote/trust-host',
 };
