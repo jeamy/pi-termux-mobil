@@ -17,6 +17,7 @@ import { watchEvents } from '@earendil-works/pi-durable';
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import { RemoteExecutionEnv } from './remote-env.mjs';
 import { attachRemote, parseSshTarget } from './remote-client.mjs';
+import { copyAuthTo, ensureRemoteServer, probeRemote, remoteBash, runtimeHash } from './remote-provision.mjs';
 import {
   acquireOwnerLock, agentOf, createCredentialStore, createModelCatalog, ensureModel, isBusy,
   openHarness, pickModel, readJson, requestIdOf, sessionStore, Subagent, whenBusyOf,
@@ -246,9 +247,21 @@ const remoteState = {
   sessionId: null,
   status: 'disconnected', // connected | reconnecting | disconnected
   lastError: null,
-  async connect(target) {
+  log: [],
+  async connect(target, { copyAuth = false, allowUpdate = false } = {}) {
     await this.disconnect();
     const prefix = process.env.PREFIX || '';
+    // make sure a pi-serverd runs there (installs + starts it in tmux if not)
+    this.log = [];
+    this.status = 'provisioning';
+    this.lastError = null;
+    try {
+      await ensureRemoteServer({ ssh: target, prefix, copyAuth, allowUpdate, authFile: AUTH_PATH, log: (l) => { this.log.push(l); if (this.log.length > 200) this.log.shift(); } });
+    } catch (e) {
+      this.status = 'disconnected';
+      this.lastError = String(e?.message || e);
+      throw e;
+    }
     const remote = await attachRemote({ ssh: target, prefix, socketDir: path.join(STATE_DIR, 'tunnels') });
     this.remote = remote;
     this.status = 'connected';
@@ -453,12 +466,41 @@ async function handleApi(req, res, url, p) {
   }
 
   // --- remote pi-server attach
+  if (p === '/api/remote/auth-status' && req.method === 'POST') {
+    let info;
+    try { info = await probeRemote({ ssh: str(body.target), prefix: process.env.PREFIX || '' }); } catch (e) {
+      // key login rejected (key not installed on the host) vs. other failures
+      const loginFailed = /ssh login failed/.test(String(e?.message));
+      return json(res, 200, { ok: false, loginFailed, error: String(e?.message || e) });
+    }
+    return json(res, 200, { ok: true, needsAuth: info.auth !== '1' && existsSync(AUTH_PATH) });
+  }
+  if (p === '/api/remote/copy-auth' && req.method === 'POST') {
+    if (!existsSync(AUTH_PATH)) return json(res, 400, { error: 'no auth.json on this device' });
+    await copyAuthTo({ ssh: str(body.target), prefix: process.env.PREFIX || '', authFile: AUTH_PATH });
+    return json(res, 200, { ok: true });
+  }
   if (p === '/api/remote/connect' && req.method === 'POST') {
-    const remote = await remoteState.connect(str(body.target));
+    const target = str(body.target);
+    // Ask before anything sensitive happens on the host: copying auth.json, or restarting an outdated daemon.
+    const askAuth = body.copyAuth === undefined && existsSync(AUTH_PATH);
+    const askUpdate = body.allowUpdate === undefined;
+    if (askAuth || askUpdate) {
+      let info;
+      try { info = await probeRemote({ ssh: target, prefix: process.env.PREFIX || '' }); } catch (e) {
+        const msg = String(e?.message || e);
+        return json(res, 200, { ok: false, loginFailed: /ssh login failed/.test(msg), error: msg });
+      }
+      if (askAuth && info.auth !== '1') return json(res, 200, { ok: false, needsAuth: true, target });
+      if (askUpdate && info.running === '1' && info.ver !== runtimeHash()) {
+        return json(res, 200, { ok: false, needsUpdate: true, target, installed: info.ver || null, available: runtimeHash() });
+      }
+    }
+    const remote = await remoteState.connect(target, { copyAuth: body.copyAuth === true, allowUpdate: body.allowUpdate === true });
     return json(res, 200, { ok: true, serverId: remote.serverId, hostKey: remote.hostKey, sessions: await remote.list() });
   }
   if (p === '/api/remote/status' && req.method === 'GET') {
-    return json(res, 200, { status: remoteState.status, error: remoteState.lastError, sessionId: remoteState.sessionId, target: remoteState.remote?.target ?? null });
+    return json(res, 200, { status: remoteState.status, error: remoteState.lastError, sessionId: remoteState.sessionId, log: remoteState.log, target: remoteState.remote?.target ?? null });
   }
   if (p === '/api/remote/disconnect' && req.method === 'POST') {
     await remoteState.disconnect();
@@ -597,6 +639,20 @@ const clampInt = (v, lo, hi, dflt) => {
   return Number.isFinite(n) && n >= lo && n <= hi ? n : dflt;
 };
 
+// Remote command for "pi CLI (ssh)": login shell + node-version-manager PATH setup; when `pi`
+// is missing but npm exists, install the latest release into ~/.local (no root needed).
+const REMOTE_PI_SCRIPT = [
+  'if ! command -v pi >/dev/null 2>&1; then',
+  ' if command -v npm >/dev/null 2>&1; then',
+  '  echo "pi not found on this host - installing the latest @earendil-works/pi-coding-agent into ~/.local ...";',
+  '  npm install -g --prefix "$HOME/.local" @earendil-works/pi-coding-agent@latest || { read -r _; exit 1; };',
+  ' else echo "pi and npm are not installed or not in PATH on this host (Node.js >= 22 + npm required)."; echo "PATH=$PATH"; read -r _; exit 1; fi;',
+  'fi;',
+  'exec pi',
+].join(' ');
+// single-quoted for the local `sh -c`: the base64 payload has no quote characters
+const REMOTE_PI_CMD = `'${remoteBash(REMOTE_PI_SCRIPT)}'`;
+
 function startPty(ws, url) {
   const cols = clampInt(url.searchParams.get('cols'), 10, 1000, 120);
   const rows = clampInt(url.searchParams.get('rows'), 5, 500, 30);
@@ -615,7 +671,7 @@ function startPty(ws, url) {
       inner = `stty cols ${cols} rows ${rows}; "${prefix}/bin/bash" "${prefix}/bin/ssh-copy-id" -i "$HOME/.ssh/id_ed25519" ${portFlag} -o "UserKnownHostsFile=$HOME/.ssh/known_hosts" -- "${target.host}"; echo; echo '[done — close or tap to exit]'; read -r _ 2>/dev/null`;
     } else {
       // remote pi session over ssh (keys via $HOME/.ssh on this device)
-      inner = `stty cols ${cols} rows ${rows}; exec "${prefix}/bin/ssh" -tt ${portFlag} -o "StrictHostKeyChecking=accept-new" -o "UserKnownHostsFile=$HOME/.ssh/known_hosts" -i "$HOME/.ssh/id_ed25519" -- "${target.host}" pi`;
+      inner = `stty cols ${cols} rows ${rows}; exec "${prefix}/bin/ssh" -tt ${portFlag} -o "StrictHostKeyChecking=accept-new" -o "UserKnownHostsFile=$HOME/.ssh/known_hosts" -i "$HOME/.ssh/id_ed25519" -- "${target.host}" ${REMOTE_PI_CMD}`;
     }
   } else {
     // -c runs under sh inside the pty: set size first, then replace with pi

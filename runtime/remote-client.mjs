@@ -32,6 +32,14 @@ export function parseSshTarget(value) {
   return { host: `${match[1] ?? ''}${match[2]}`, port };
 }
 
+/** Non-interactive ssh options shared by the tunnel and the provisioning calls. */
+export function sshBaseOptions(home, port) {
+  return ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new',
+    '-o', `UserKnownHostsFile=${home}/.ssh/known_hosts`, '-i', `${home}/.ssh/id_ed25519`,
+    '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
+    ...(port ? ['-p', String(port)] : [])];
+}
+
 export async function attachRemote({ ssh, prefix = '', socketDir, serverId, remoteSock }) {
   const sshBin = `${prefix}/bin/ssh`;
   const { host: sshHost, port: sshPort } = parseSshTarget(ssh);
@@ -43,10 +51,7 @@ export async function attachRemote({ ssh, prefix = '', socketDir, serverId, remo
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
   const localSock = path.join(dir, name);
-  const sshOpts = ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new',
-    '-o', `UserKnownHostsFile=${home}/.ssh/known_hosts`, '-i', `${home}/.ssh/id_ed25519`,
-    '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
-    ...(sshPort ? ['-p', String(sshPort)] : [])];
+  const sshOpts = sshBaseOptions(home, sshPort);
 
   const sshExec = (remoteCmd) => new Promise((resolve, reject) => {
     const c = spawn(sshBin, [...sshOpts, '--', sshHost, remoteCmd], { env: process.env });

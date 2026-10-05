@@ -4,7 +4,7 @@
 > development. Remote sessions, the embedded Termux runtime, and Android
 > background-process handling may still change or fail on individual devices.
 >
-> **Version 0.0.1** — still quick & dirty, see the [changelog](#changelog).
+> **Version 0.0.2** — still quick & dirty, see the [changelog](#changelog).
 
 Minimal Android app that embeds Termux-built binaries (Node.js 26.4.0, bash,
 coreutils, git, ripgrep, fd, openssh, npm, util-linux `script`, …) plus a
@@ -86,6 +86,7 @@ selected, creates one automatically when the host has none, opens the newest
 session first, restores its transcript, and displays a model picker using the
 remote host's available models. Remote uses non-interactive SSH key login, so
 run **⇧key** / `ssh-copy-id` for a host before using it here.
+On connect the app checks the host and sets it up if needed — see [Remote host setup](#remote-host-setup-automatic).
 Endpoints: `/api/remote/{connect,status,sessions,models,model,create,delete,attach,prompt,abort,compact,state,history,events,disconnect}`.
 Events are long-polled with a sequence number and an epoch (`?after=<seq>&epoch=<id>`);
 several clients can read the same session, a lost response is fetched again,
@@ -120,6 +121,51 @@ PI_REMOTE_TOKEN=<secret, >=16 chars> PI_REMOTE_PORT=7842 node env-server.mjs
 Output is streamed (NDJSON); aborting a tool call kills the command's whole
 process group on the remote host. Never expose env-server on a LAN without a
 tunnel/VPN — it executes arbitrary commands.
+
+## Remote host setup (automatic)
+
+Connecting to a host from the **Remote** page, **Clients → ▸_** or **pi CLI (ssh)**
+prepares the host over SSH. Everything runs with the phone's key (non-interactive
+`ssh`), under the host user's account; no root is needed except for installing tmux.
+Each sensitive step asks first.
+
+| Step | When | Asks? |
+|---|---|---|
+| **SSH key** | host rejects the phone's ed25519 key | yes — runs `ssh-copy-id` in the terminal (password once), then returns and reconnects |
+| **auth.json** | host has no `~/.pi/agent/auth.json` | yes — **red warning**: all API keys / OAuth tokens of the phone are copied to that machine (mode 600) |
+| **pi-serverd** (Remote page) | no daemon running | no — installs and starts it |
+| **pi-serverd update** | daemon running, files differ from the phone's | yes — the daemon restarts, running work is interrupted (durable sessions resume) |
+| **pi** (pi CLI ssh) | `pi` not found on the host | no — installs the latest release |
+
+**pi-serverd.** `runtime/remote-provision.mjs` copies `pi-serverd.mjs`, `common.mjs`
+and the package files to `~/.pi-mobile-remote/runtime`, runs `npm ci --omit=dev`
+(only when `package*.json` changed) and starts `node pi-serverd.mjs` in the tmux
+session `pi-serverd`. Missing tmux is installed through apt / dnf / yum / pacman /
+apk / zypper / brew / Termux `pkg` when running as root or with `sudo -n`;
+otherwise the daemon falls back to `nohup setsid` (log:
+`~/.pi-mobile-remote/runtime/serverd.log`). Progress is shown in the Remote page
+(`/api/remote/status` → `log`).
+
+**Version check.** The installed state is a SHA-256 (16 hex chars) over
+`pi-serverd.mjs`, `common.mjs`, `package.json` and `package-lock.json`, stored in
+`~/.pi-mobile-remote/runtime/.version` (`.deps` holds the dependency hash). Any
+difference to the files on the phone means *outdated*; declining the update keeps
+the old daemon.
+
+**pi.** For the full TUI, `ssh -tt <host> pi` runs through a login shell. If `pi`
+is missing and npm exists, the latest `@earendil-works/pi-coding-agent` is
+installed with `npm install -g --prefix ~/.local` (no root; `~/.local/bin` is put
+in front of `PATH`) and started; the installation output is visible in the terminal.
+An installed `pi` is never updated automatically.
+
+**Node.** Node.js >= 22 and npm must already exist on the host and are *not*
+installed automatically. They are found in login shells and — because nvm, fnm,
+Volta, asdf and nodenv set `PATH` in `~/.bashrc` — through a prelude that sources
+`~/.nvm/nvm.sh` and adds the usual shim directories.
+
+**auth.json.** Without credentials the daemon has no models and prompts fail with
+*Internal server error*. Declining the copy is fine: add a key on the host (`pi`,
+`/login`) instead. Never copy it to hosts you do not fully trust.
 
 ## Layout
 
@@ -168,7 +214,7 @@ cd runtime
 find node_modules -type d -name .bin -exec rm -rf {} +    # npm recreates these!
 find node_modules -type l ! -exec test -e {} \; -delete
 tar czf ../android/app/src/main/assets/runtime.bin --transform 's,^,runtime/,' \
-  server.mjs common.mjs remote-env.mjs env-server.mjs pi-serverd.mjs remote-client.mjs \
+  server.mjs common.mjs remote-env.mjs env-server.mjs pi-serverd.mjs remote-client.mjs remote-provision.mjs \
   package.json package-lock.json public node_modules
 ```
 
@@ -215,6 +261,45 @@ Caveats on device:
 See ANALYSE.md for the full evaluation and upstream facts.
 
 ## Changelog
+
+### 0.0.2 — 2026-10-05
+
+Hosts are now prepared automatically when connecting remotely. Details:
+[Remote host setup](#remote-host-setup-automatic).
+
+**Remote host setup**
+
+- **pi-serverd installation.** Connecting from the Remote page checks the host
+  over SSH; without a running daemon the server files are copied to
+  `~/.pi-mobile-remote/runtime`, dependencies installed (`npm ci --omit=dev`) and
+  the daemon started in the tmux session `pi-serverd`. tmux is installed if
+  possible (root or `sudo -n`), otherwise `nohup setsid` is used. The progress
+  log appears in the Remote page.
+- **Version check and update.** A hash over the server files decides whether the
+  daemon on the host is outdated; updating restarts it and asks first.
+  `npm ci` only runs when the package files changed.
+- **pi installation.** *pi CLI (ssh)* and *Clients → ▸_* install the latest
+  `@earendil-works/pi-coding-agent` into `~/.local` when `pi` is missing and npm
+  exists.
+- **auth.json.** A host without `~/.pi/agent/auth.json` gets the phone's file
+  only after a red warning dialog and consent (mode 600). Without credentials the
+  remote daemon answered every prompt with *Internal server error*.
+- **SSH key.** A host that rejects the phone's key offers `ssh-copy-id` in the
+  terminal and then reconnects (Remote page) or continues (terminal).
+- **Node from version managers.** Remote commands source nvm/fnm/Volta/asdf paths;
+  Node installed through them was reported as missing before.
+- The Remote page connect button turns into **disconnect** while connected.
+
+**Fixes**
+
+- The terminal registered another key handler on every reconnect, which would
+  send input twice.
+
+**Notes**
+
+- Node.js >= 22 + npm on the host are still required and are not installed.
+- `RUNTIME_VERSION` 44; the new `remote-provision.mjs` is part of the runtime
+  archive (see *Repackaging assets*).
 
 ### 0.0.1 — 2026-10-04
 
