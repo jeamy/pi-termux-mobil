@@ -6,12 +6,14 @@
 /android/.gradle/
 /android/app/build/
 /android/app/src/main/assets/*.bin
+/android/app/src/main/assets/payload.sha256
 /android/local.properties
 /android/.idea/
 /android/*.iml
 
 # Node.js dependencies
 /runtime/node_modules/
+/runtime/space-examples/
 
 # OS noise
 .DS_Store

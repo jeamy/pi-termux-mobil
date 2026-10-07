@@ -238,28 +238,37 @@ Toolchain notes:
   app-private binaries working (Android 10+ SELinux blocks it for
   targetSdk >= 29). `PiService` falls back to launching node via
   `/system/bin/linker64` if direct exec ever fails, so targetSdk can be raised.
-- `RUNTIME_VERSION` in `RuntimeInstaller.java` gates re-extraction — bump it
-  whenever assets change. An upgrade replaces `usr/` and `runtime/` entirely
+- Asset fingerprints automatically trigger re-extraction when the runtime or rootfs changes.
+  `RUNTIME_VERSION` in `RuntimeInstaller.java` covers installer behavior changes. An upgrade replaces `usr/` and `runtime/` entirely
   (archives are streamed into tar); `home/` and `work/` are kept.
 
 ## Repackaging assets
+
+Every Android build runs `scripts/prepare-runtime.py` before `preBuild`. It rebuilds pi-spaces from the
+sibling checkout, synchronizes `runtime/pi-spaces.mjs` and compiled `runtime/space-examples/*.mjs`, then
+packages `runtime.bin` and generates `payload.sha256` for the runtime/rootfs pair. Changed payloads are
+re-extracted on the device without a manual version bump. Unchanged files keep their timestamps.
+
+Build prerequisites: Python 3, installed mobile runtime dependencies and the prepared rootfs asset.
+Refreshing from source additionally needs Node/npm and the pi-spaces development dependencies.
+Set `PI_SPACES_SOURCE` for a source checkout elsewhere. If the source is missing or incompatible, the
+Android build warns and uses the existing mobile bundles. Missing required bundles still fail the build;
+errors while building an available source checkout are also reported as build failures.
+Running `npm run bundle` in pi-spaces also synchronizes this checkout automatically; an alternate mobile
+checkout can be selected with `PI_SPACES_MOBILE_ROOT`. Generated example modules are CLI programs,
+not additional mobile buttons or Federation services. Remote provisioning includes them in its release hash
+and transfers them along with the library; existing update confirmation rules still apply.
 
 ```bash
 # rootfs.bin = gzipped tar of the Termux usr/ tree
 cd debs/rootfs/data/data/com.termux/files
 tar czf ../../../../../android/app/src/main/assets/rootfs.bin usr
 
-# runtime.bin = gzipped tar of the pi runtime as runtime/ prefix
-# IMPORTANT: strip node_modules/.bin dirs + dangling symlinks first —
-# toybox tar on-device exits non-zero on them and extraction aborts
-cd runtime
-find node_modules -type d -name .bin -exec rm -rf {} +    # npm recreates these!
-find node_modules -type l ! -exec test -e {} \; -delete
-tar czf ../android/app/src/main/assets/runtime.bin --transform 's,^,runtime/,' \
-  server.mjs common.mjs remote-env.mjs env-server.mjs pi-serverd.mjs remote-client.mjs remote-provision.mjs \
-  package.json package-lock.json public node_modules
+# Optional manual preparation from the repository root (also performed by Gradle):
+python3 scripts/prepare-runtime.py
 ```
 
+The script omits node_modules/.bin and broken links from the archive without deleting local files.
 (.bin suffix because aapt decompresses *.gz assets into the APK uncompressed.
 `RuntimeInstaller` tolerates tar's non-zero exit when the expected payload
 files are present — bad-symlink warnings are only logged.)

@@ -232,6 +232,9 @@ export const SessionRegistry = defineDoc({
   initial: () => ({ sessions: {}, activeId: null }),
 });
 
+// pi-spaces shared space; refreshed automatically by pi-spaces bundle and the Android pre-build task.
+export { spaces as Spaces, startService as startSpaceService } from './pi-spaces.mjs';
+
 export async function openHarness({ dbPath, models, env, extensions = [] }, ctx) {
   const registry = createRegistry();
   registry.install(CodingTools);
@@ -384,4 +387,3 @@ export function requestIdOf(value) {
 export function whenBusyOf(value) {
   return value === 'steer' || value === 'reject' ? value : undefined;
 }
-

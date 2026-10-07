@@ -2,6 +2,14 @@ plugins {
     id 'com.android.application'
 }
 
+// Run on every build: the script rebuilds the sibling pi-spaces source and preserves unchanged assets.
+def mobileRoot = rootProject.projectDir.parentFile
+tasks.register('prepareMobileRuntime', Exec) {
+    workingDir mobileRoot
+    commandLine 'python3', new File(mobileRoot, 'scripts/prepare-runtime.py').absolutePath
+}
+tasks.named('preBuild').configure { dependsOn 'prepareMobileRuntime' }
+
 android {
     namespace 'org.pimobile.app'
     compileSdk 35

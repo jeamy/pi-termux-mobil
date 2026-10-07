@@ -38,9 +38,21 @@ final class RuntimeInstaller {
                     off += n;
                 }
             }
-            return Integer.parseInt(new String(b).trim()) == RUNTIME_VERSION;
+            return new String(b, "UTF-8").trim().equals(payloadStamp(ctx));
         } catch (Exception e) {
             return false;
+        }
+    }
+
+    private static String payloadStamp(Context ctx) throws IOException {
+        try (InputStream in = ctx.getAssets().open("payload.sha256")) {
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            byte[] buffer = new byte[128];
+            int n;
+            while ((n = in.read(buffer)) >= 0) bytes.write(buffer, 0, n);
+            String hash = bytes.toString("UTF-8").trim();
+            if (!hash.matches("[0-9a-f]{64}")) throw new IOException("invalid payload fingerprint");
+            return RUNTIME_VERSION + ":" + hash;
         }
     }
 
@@ -63,7 +75,7 @@ final class RuntimeInstaller {
         File stamp = new File(files, STAMP_NAME);
         File tmpStamp = new File(files, STAMP_NAME + ".tmp");
         try (FileOutputStream out = new FileOutputStream(tmpStamp)) {
-            out.write(String.valueOf(RUNTIME_VERSION).getBytes("UTF-8"));
+            out.write(payloadStamp(ctx).getBytes("UTF-8"));
             out.getFD().sync();
         }
         if (!tmpStamp.renameTo(stamp)) throw new IOException("could not write " + stamp);

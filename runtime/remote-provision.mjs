@@ -3,13 +3,13 @@
 import { spawn } from 'node:child_process';
 import { createGzip } from 'node:zlib';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { attachRemote, parseSshTarget, sshBaseOptions } from './remote-client.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-export const REMOTE_FILES = ['pi-serverd.mjs', 'common.mjs', 'package.json', 'package-lock.json'];
+export const REMOTE_FILES = ['pi-serverd.mjs', 'common.mjs', 'pi-spaces.mjs', 'space-examples', 'package.json', 'package-lock.json'];
 export const REMOTE_DIR = '.pi-mobile-remote/runtime';
 export const TMUX_SESSION = 'pi-serverd';
 export const PRELUDE = 'export PATH="$HOME/.local/bin:$HOME/.volta/bin:$HOME/.asdf/shims:$HOME/.nodenv/shims:/opt/homebrew/bin:/usr/local/bin:$PATH"; '
@@ -20,7 +20,14 @@ const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 export const remoteBash = (script) => `bash -l -c "$(echo ${Buffer.from(PRELUDE + script).toString('base64')} | base64 -d)"`;
 export function runtimeHash(root = ROOT, files = REMOTE_FILES) {
   const h = createHash('sha256');
-  for (const f of files) { h.update(f); h.update(readFileSync(path.join(root, f))); }
+  const hashPath = (relative) => {
+    const full = path.join(root, relative);
+    h.update(relative);
+    if (statSync(full).isDirectory()) {
+      for (const name of readdirSync(full).sort()) hashPath(path.posix.join(relative, name));
+    } else h.update(readFileSync(full));
+  };
+  for (const f of files) hashPath(f);
   return h.digest('hex').slice(0, 16);
 }
 export function nodeSupported(version) {

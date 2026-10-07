@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { nodeSupported, runtimeHash, remoteBash } from './remote-provision.mjs';
 import { parseSshTarget } from './remote-client.mjs';
 
@@ -16,4 +19,21 @@ test('release hash is stable, dependency hash differs', () => {
   assert.match(runtimeHash(), /^[0-9a-f]{16}$/);
   assert.notEqual(runtimeHash(), runtimeHash(undefined, ['package.json', 'package-lock.json']));
   assert.match(remoteBash('echo hello'), /^bash -l -c /);
+});
+test('release hash detects changed, added and removed bundled examples', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'pi-mobile-hash-'));
+  try {
+    mkdirSync(path.join(dir, 'space-examples'));
+    const file = path.join(dir, 'space-examples/sieve.mjs');
+    writeFileSync(file, 'initial');
+    const initial = runtimeHash(dir, ['space-examples']);
+    writeFileSync(file, 'updated');
+    const updated = runtimeHash(dir, ['space-examples']);
+    assert.notEqual(updated, initial);
+    const added = path.join(dir, 'space-examples/cache.mjs');
+    writeFileSync(added, 'new example');
+    assert.notEqual(runtimeHash(dir, ['space-examples']), updated);
+    rmSync(added);
+    assert.equal(runtimeHash(dir, ['space-examples']), updated);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

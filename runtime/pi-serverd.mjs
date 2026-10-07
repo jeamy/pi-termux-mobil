@@ -17,7 +17,7 @@ import { SessionNotFoundError } from '@earendil-works/pi-server';
 import {
   acquireOwnerLock, createCredentialStore, createEventHub, createModelCatalog,
   ensureModel, isBusy, openHarness, pickModel, readJson, requestIdOf, sessionStore, Subagent,
-  whenBusyOf, writeFileAtomic,
+  whenBusyOf, writeFileAtomic, Spaces, startSpaceService,
 } from './common.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -53,7 +53,7 @@ const harness = await openHarness({
   dbPath: DB,
   models,
   env: ({ cwd }) => (cwd && cwd !== WORKDIR ? new NodeExecutionEnv({ cwd, env: process.env }) : env),
-  extensions: [Subagent],
+  extensions: [Subagent, Spaces],
 }, ctx);
 const sessions = sessionStore(harness, ctx);
 
@@ -68,6 +68,7 @@ const sessions = sessionStore(harness, ctx);
   }
 }
 harness.resume();
+const stopSpaces = await startSpaceService(harness, ctx); // reaper + event delivery for the shared space
 
 const events = createEventHub(harness, ctx);
 
@@ -221,6 +222,7 @@ async function shutdown(signal) {
   console.log(`pi-serverd: ${signal}, closing`);
   try { await server.close?.(); } catch {}
   try { await events.close(); } catch {}
+  try { await stopSpaces(); } catch {}
   try { await harness.close(ctx); } catch (e) { console.error('harness.close:', e?.message || e); }
   releaseLock();
   process.exit(0);
