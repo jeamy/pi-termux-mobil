@@ -6,7 +6,7 @@ var __export = (target, all) => {
 
 // src/index.ts
 import { Type } from "@earendil-works/pi-ai";
-import { defineDoc as defineDoc2, defineExtension, defineTool, section } from "@earendil-works/pi-durable";
+import { defineDoc as defineDoc3, defineExtension, defineTool, section } from "@earendil-works/pi-durable";
 
 // src/client.ts
 import { awaitWithContext } from "@earendil-works/chord/context";
@@ -35,6 +35,7 @@ __export(core_exports, {
   createTxn: () => createTxn,
   deadlineOf: () => deadlineOf,
   deepEqual: () => deepEqual,
+  gidOf: () => gidOf,
   initialState: () => initialState,
   limitsOf: () => limitsOf,
   list: () => list,
@@ -42,6 +43,7 @@ __export(core_exports, {
   migrate: () => migrate,
   nextExpiry: () => nextExpiry,
   notify: () => notify,
+  plain: () => plain,
   probe: () => probe,
   releaseTxn: () => releaseTxn,
   renew: () => renew,
@@ -60,7 +62,7 @@ var DEFAULT_LEASE_MS = 3600 * 1e3;
 var MAX_TIMER_MS = 2 ** 31 - 1;
 var until = (now, ms2) => ms2 >= FOREVER - now ? FOREVER : now + ms2;
 var timerDelay = (ms2) => Math.min(Math.max(1, ms2), MAX_TIMER_MS);
-var DEFAULT_LIMITS = { maxEntryBytes: 64 * 1024, maxTypeChars: 128, maxTypes: 16, maxEntries: 1e4, maxEntriesPerOwner: 1e3, maxRegsPerOwner: 20, maxWaitersPerOwner: 20, maxTxnsPerOwner: 20, maxSpaceBytes: 64 * 1024 * 1024, notifyIntervalMs: 1e3 };
+var DEFAULT_LIMITS = { maxEntryBytes: 64 * 1024, maxTypeChars: 128, maxTypes: 16, maxEntries: 1e4, maxEntriesPerOwner: 1e3, maxRegsPerOwner: 20, maxWaitersPerOwner: 20, maxTxnsPerOwner: 20, maxSpaceBytes: 64 * 1024 * 1024, notifyIntervalMs: 1e3, claimResultMs: 24 * 3600 * 1e3, generationAdmitMs: 3600 * 1e3 };
 var LimitError = class extends Error {
 };
 var IllegalArgumentError = class extends Error {
@@ -82,10 +84,15 @@ var migrate = (v, _from) => {
     waiters: v.waiters ?? d.waiters,
     outbox: v.outbox ?? d.outbox,
     ...v.limits ? { limits: v.limits } : {},
+    ...typeof v.spaceId === "string" ? { spaceId: v.spaceId } : {},
+    ...typeof v.incarnation === "string" ? { incarnation: v.incarnation } : {},
+    ...v.rpc ? { rpc: v.rpc } : {},
+    // request claims (claims.ts)
     returned: v.returned ?? d.returned
   };
 };
 var clone = (v) => JSON.parse(JSON.stringify(v));
+var plain = (v) => v === void 0 ? v : clone(v);
 var encoder = new TextEncoder();
 var jsonBytes = (v) => encoder.encode(JSON.stringify(v) ?? "").length;
 var limitsOf = (s) => ({ ...DEFAULT_LIMITS, ...s.limits ?? {} });
@@ -101,7 +108,8 @@ function checkSize(what, v, lim) {
   const n = jsonBytes(v);
   if (n > lim.maxEntryBytes) throw new LimitError(`${what} is ${n} bytes; the limit is ${lim.maxEntryBytes}`);
 }
-var newId = (s, p) => `${p}${s.nextId++}`;
+var newId = (s, p) => s.incarnation ? `${p}${s.incarnation}-${s.nextId++}` : `${p}${s.nextId++}`;
+var gidOf = (spaceId, id) => `${spaceId}/${id}`;
 function grant(requested, now) {
   if (typeof requested !== "number" || Number.isNaN(requested)) throw new IllegalArgumentError("bad lease");
   if (requested < 0 && requested !== ANY) throw new IllegalArgumentError("negative lease");
@@ -145,12 +153,20 @@ function settle(s, now) {
   serve(s, now);
   flushRegs(s, now);
 }
+function prune(a, drop) {
+  let n = 0;
+  for (let i = a.length - 1; i >= 0; i--) if (drop(a[i])) {
+    a.splice(i, 1);
+    n++;
+  }
+  return n;
+}
 function expire(s, at) {
   for (const r of s.regs) if (r.expires <= at && r.pending && r.pendingEntry) emit(s, r, r.pendingEntry, r.pending, at);
-  s.entries = s.entries.filter((e) => e.expires > at);
-  s.regs = s.regs.filter((r) => r.expires > at);
+  prune(s.entries, (e) => e.expires <= at);
+  prune(s.regs, (r) => r.expires <= at);
   for (const w of s.waiters) if (w.deadline <= at) s.outbox.push({ kind: "timeout", eventId: w.id, seq: 1, handback: w.handback, target: w.target });
-  s.waiters = s.waiters.filter((w) => w.deadline > at);
+  prune(s.waiters, (w) => w.deadline <= at);
 }
 function write(s, now, entry, txn, lease, as) {
   settle(s, now);
@@ -204,10 +220,10 @@ function notifyWrite(s, e, txn, now) {
     if (!applies || !matches(r.template, e)) continue;
     if (intervalOf(s, r) && r.lastEventAt !== void 0 && now < r.lastEventAt + intervalOf(s, r)) {
       r.pending = (r.pending ?? 0) + 1;
-      r.pendingEntry = view(e);
+      r.pendingEntry = view(e, s.spaceId);
       continue;
     }
-    emit(s, r, view(e), 1 + (r.pending ?? 0), now);
+    emit(s, r, view(e, s.spaceId), 1 + (r.pending ?? 0), now);
   }
 }
 function flushRegs(s, now) {
@@ -221,7 +237,7 @@ function probe(s, now, tmpl2, txn, take, as) {
   const f = find(s, tmpl2, txn, take);
   return f.status === "found" ? { status: "found", entry: apply(s, f.rec, txn, take) } : f;
 }
-var view = (e) => ({ id: e.id, type: e.type, types: [...e.types], fields: clone(e.fields), owner: e.owner });
+var view = (e, spaceId) => ({ id: e.id, ...spaceId ? { gid: gidOf(spaceId, e.id) } : {}, type: e.type, types: [...e.types], fields: clone(e.fields), owner: e.owner });
 function find(s, tmpl2, txn, take) {
   let locked = false;
   for (const e of s.entries) {
@@ -295,9 +311,7 @@ function addWaiter(s, now, w) {
   return rec.id;
 }
 function cancelWaiter(s, id) {
-  const n = s.waiters.length;
-  s.waiters = s.waiters.filter((w) => w.id !== id);
-  return s.waiters.length < n;
+  return prune(s.waiters, (w) => w.id === id) > 0;
 }
 function serve(s, now) {
   for (const w of [...s.waiters]) {
@@ -305,37 +319,42 @@ function serve(s, now) {
     if (f.status !== "found") continue;
     s.waiters.splice(s.waiters.indexOf(w), 1);
     if (!w.take) {
-      s.outbox.push({ kind: "waiter", eventId: w.id, seq: 1, handback: w.handback, target: w.target, entry: view(apply(s, f.rec, null, false)) });
+      s.outbox.push({ kind: "waiter", eventId: w.id, seq: 1, handback: w.handback, target: w.target, entry: view(apply(s, f.rec, null, false), s.spaceId) });
       continue;
     }
     const t = { id: newId(s, "t"), expires: until(now, w.txnLeaseMs), owner: w.target };
     s.txns[t.id] = t;
-    s.outbox.push({ kind: "waiter", eventId: w.id, seq: 1, handback: w.handback, target: w.target, entry: view(apply(s, f.rec, t.id, true)), txn: t.id });
+    s.outbox.push({ kind: "waiter", eventId: w.id, seq: 1, handback: w.handback, target: w.target, entry: view(apply(s, f.rec, t.id, true), s.spaceId), txn: t.id });
   }
 }
 function finish(s, id, commit, now) {
   delete s.txns[id];
-  s.regs = s.regs.filter((r) => r.txn !== id);
-  const keep = [];
+  prune(s.regs, (r) => r.txn === id);
   const published = [];
-  for (const e of s.entries) {
-    e.readBy = e.readBy.filter((t) => t !== id);
+  for (let i = s.entries.length - 1; i >= 0; i--) {
+    const e = s.entries[i];
+    if (e.readBy.includes(id)) prune(e.readBy, (t) => t === id);
     if (commit) {
-      if (e.takenBy === id) continue;
+      if (e.takenBy === id) {
+        s.entries.splice(i, 1);
+        continue;
+      }
       if (e.writtenUnder === id) {
         e.writtenUnder = null;
         published.push(e);
       }
     } else {
-      if (e.writtenUnder === id) continue;
+      if (e.writtenUnder === id) {
+        s.entries.splice(i, 1);
+        continue;
+      }
       if (e.takenBy === id) {
         e.takenBy = null;
         s.returned = (s.returned ?? 0) + 1;
       }
     }
-    keep.push(e);
   }
-  s.entries = keep;
+  published.reverse();
   for (const e of published) notifyWrite(s, e, null, now);
 }
 function notify(s, now, tmpl2, txn, lease, handback, target, as) {
@@ -428,7 +447,7 @@ function list(s, now, tmpl2 = null, txn = null, limit = MAX_LIST, as) {
   for (const e of s.entries) {
     if (out.length >= Math.min(limit, MAX_LIST)) break;
     const st = standing(s, e, now);
-    if ((st === "visible" || st === "uncommitted" && mine && e.writtenUnder === txn) && matches(tmpl2, e)) out.push(view(e));
+    if ((st === "visible" || st === "uncommitted" && mine && e.writtenUnder === txn) && matches(tmpl2, e)) out.push(view(e, s.spaceId));
   }
   return out;
 }
@@ -452,11 +471,215 @@ function stats(s, now) {
 import { defineDoc } from "@earendil-works/pi-durable";
 var Space = defineDoc({
   kind: "pi-spaces.space",
-  version: 4,
+  version: 5,
+  // 5: spaceId and incarnation (named spaces, see spaces.ts)
   scope: "session",
   initial: () => initialState(),
   migrate: (v, from) => migrate(v, from)
 });
+
+// src/spaces.ts
+import { randomBytes, randomUUID } from "node:crypto";
+import { defineDoc as defineDoc2, defineDocFamily } from "@earendil-works/pi-durable";
+var DEFAULT_ALIAS = "default";
+var ALIAS = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+var Registry = defineDoc2({
+  kind: "pi-spaces.registry",
+  version: 1,
+  scope: "session",
+  initial: () => ({ hostId: null, defaultSpaceId: null, spaces: {}, aliases: {} })
+});
+var NamedSpace = defineDocFamily({
+  kind: "pi-spaces.named-space",
+  version: 5,
+  scope: "session",
+  family: true,
+  initial: () => initialState(),
+  migrate: (v, from) => migrate(v, from)
+});
+var UnknownSpaceError = class extends Error {
+};
+var newIncarnation = () => randomBytes(4).toString("hex");
+var newSpaceId = () => `sp-${randomUUID()}`;
+async function registry(tx, now) {
+  const r = await tx.doc(Registry);
+  if (r.hostId === null) r.hostId = `host-${randomUUID()}`;
+  if (r.defaultSpaceId === null) {
+    const d = await tx.doc(Space);
+    const info = { spaceId: d.spaceId ?? newSpaceId(), alias: DEFAULT_ALIAS, incarnation: d.incarnation ?? newIncarnation(), createdAt: now };
+    d.spaceId = info.spaceId;
+    d.incarnation = info.incarnation;
+    r.defaultSpaceId = info.spaceId;
+    r.spaces[info.spaceId] = info;
+    r.aliases[DEFAULT_ALIAS] = info.spaceId;
+  }
+  return r;
+}
+async function resolveSpaceId(tx, space, now) {
+  const r = await registry(tx, now);
+  if (space === void 0) return r.defaultSpaceId;
+  const id = r.aliases[space] ?? (r.spaces[space] ? space : void 0);
+  if (id === void 0) throw new UnknownSpaceError(`unknown space: ${space}`);
+  return id;
+}
+async function spaceDoc(tx, space, now) {
+  const id = await resolveSpaceId(tx, space, now);
+  const r = await tx.doc(Registry);
+  return id === r.defaultSpaceId ? tx.doc(Space) : tx.doc(NamedSpace, id, null);
+}
+async function createSpace(tx, alias, now) {
+  if (typeof alias !== "string" || !ALIAS.test(alias)) throw new IllegalArgumentError("alias: 1-64 of a-z 0-9 . _ - (starting with a letter or digit)");
+  const r = await registry(tx, now);
+  const known = r.aliases[alias];
+  if (known !== void 0) return plain(r.spaces[known]);
+  const info = { spaceId: newSpaceId(), alias, incarnation: newIncarnation(), createdAt: now };
+  const d = await tx.doc(NamedSpace, info.spaceId, null);
+  d.spaceId = info.spaceId;
+  d.incarnation = info.incarnation;
+  r.spaces[info.spaceId] = info;
+  r.aliases[alias] = info.spaceId;
+  return { ...info };
+}
+async function listSpaces(host, ctx) {
+  const r = await host.snapshot(Registry, ctx);
+  if (!r) return [];
+  const all = Object.values(r.spaces).map((i) => ({ ...i }));
+  return all.sort((a, b) => a.spaceId === r.defaultSpaceId ? -1 : b.spaceId === r.defaultSpaceId ? 1 : a.createdAt - b.createdAt);
+}
+async function snapshotSpace(host, spaceId, ctx) {
+  const r = await host.snapshot(Registry, ctx);
+  if (r && spaceId === r.defaultSpaceId) return host.snapshot(Space, ctx);
+  if (r && !r.spaces[spaceId]) return void 0;
+  return host.snapshot(NamedSpace, spaceId, ctx);
+}
+
+// src/claims.ts
+var claims_exports = {};
+__export(claims_exports, {
+  IncarnationChanged: () => IncarnationChanged,
+  OperationCancelled: () => OperationCancelled,
+  RequestConflict: () => RequestConflict,
+  RequestExpired: () => RequestExpired,
+  ResultExpired: () => ResultExpired,
+  admit: () => admit,
+  argHash: () => argHash,
+  cancelRequest: () => cancelRequest,
+  decide: () => decide,
+  issueGeneration: () => issueGeneration,
+  lookup: () => lookup,
+  sweep: () => sweep
+});
+import { createHash, randomBytes as randomBytes2 } from "node:crypto";
+
+// src/canonical.ts
+function canonicalJson(v) {
+  if (v === null || typeof v === "boolean" || typeof v === "string") return JSON.stringify(v);
+  if (typeof v === "number") {
+    if (!Number.isFinite(v)) throw new TypeError("canonical JSON: non-finite number");
+    return JSON.stringify(Object.is(v, -0) ? 0 : v);
+  }
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
+  if (typeof v === "object") {
+    const keys = Object.keys(v).filter((k) => v[k] !== void 0).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(v[k])}`).join(",")}}`;
+  }
+  throw new TypeError(`canonical JSON: unsupported ${typeof v}`);
+}
+
+// src/claims.ts
+var RequestConflict = class extends Error {
+};
+var RequestExpired = class extends Error {
+};
+var ResultExpired = class extends Error {
+};
+var IncarnationChanged = class extends Error {
+};
+var OperationCancelled = class extends Error {
+};
+var rpc = (s) => {
+  const x = s;
+  if (!x.rpc) x.rpc = { generations: {}, claims: {} };
+  return x.rpc;
+};
+var samePrincipal = (a, b) => canonicalJson(a) === canonicalJson(b);
+var checkPrincipal = (p) => {
+  if (!p || typeof p.peerId !== "string" || p.peerId === "" || p.agentId !== void 0 && typeof p.agentId !== "string") throw new TypeError("principal needs a peerId");
+};
+var argHash = (method, args) => createHash("sha256").update(canonicalJson({ method, args })).digest("hex");
+var keyOf = (s, r) => canonicalJson([r.principal, s.spaceId ?? null, r.generation, r.requestId]);
+function issueGeneration(s, now, principal) {
+  checkPrincipal(principal);
+  const generation = `g${randomBytes2(8).toString("hex")}`;
+  const admitUntil = now + limitsOf(s).generationAdmitMs;
+  rpc(s).generations[generation] = { principal: { ...principal }, incarnation: s.incarnation ?? null, issuedAt: now, admitUntil };
+  return { generation, admitUntil };
+}
+function admit(s, now, r, method, args, deadline) {
+  checkPrincipal(r.principal);
+  if (typeof r.requestId !== "string" || r.requestId === "" || typeof r.generation !== "string") throw new TypeError("request needs a generation and a requestId");
+  sweep(s, now);
+  const st = rpc(s);
+  const key = keyOf(s, r);
+  const hash = argHash(method, args);
+  const c = st.claims[key];
+  if (c) {
+    if (c.method !== method || c.argHash !== hash) throw new RequestConflict(`request ${r.requestId} was used for different arguments`);
+    if (c.state === "pending") return { kind: "pending", key, deadline: c.deadline };
+    if (c.resultExpired) throw new ResultExpired(`request ${r.requestId} was decided; its result is no longer kept`);
+    return c.state === "cancelled" ? { kind: "cancelled", key } : { kind: "done", key, result: c.result ?? null };
+  }
+  const g = st.generations[r.generation];
+  if (!g) throw new RequestExpired(`generation ${r.generation} is unknown or expired`);
+  if (g.incarnation !== (s.incarnation ?? null)) throw new IncarnationChanged(`generation ${r.generation} belongs to an earlier incarnation of this space`);
+  if (!samePrincipal(g.principal, r.principal)) throw new RequestExpired(`generation ${r.generation} was issued to another principal`);
+  if (now > g.admitUntil) throw new RequestExpired(`generation ${r.generation} no longer admits new requests`);
+  st.claims[key] = { method, argHash: hash, deadline, state: "pending", generation: r.generation, requestId: r.requestId, principal: { ...r.principal } };
+  return { kind: "fresh", key, deadline };
+}
+function decide(s, now, key, outcome) {
+  const c = rpc(s).claims[key];
+  if (!c) throw new Error(`no claim ${key}`);
+  if (c.state !== "pending") return;
+  c.state = outcome.state;
+  c.result = outcome.state === "done" ? outcome.result : null;
+  c.decidedAt = now;
+}
+function lookup(s, r, now) {
+  const c = s.rpc?.claims[keyOf(s, r)];
+  if (!c) throw new RequestExpired(`request ${r.requestId} is unknown`);
+  const expired = c.resultExpired || c.state !== "pending" && c.decidedAt !== void 0 && c.decidedAt + limitsOf(s).claimResultMs <= now;
+  return { state: c.state, deadline: c.deadline, method: c.method, ...expired ? { resultExpired: true } : c.state === "pending" ? {} : { result: c.result ?? null } };
+}
+function cancelRequest(s, now, target) {
+  sweep(s, now);
+  const key = keyOf(s, target);
+  const c = rpc(s).claims[key];
+  if (!c) throw new RequestExpired(`request ${target.requestId} is unknown`);
+  if (c.state === "pending") decide(s, now, key, { state: "cancelled" });
+  return lookup(s, target, now);
+}
+function sweep(s, now) {
+  const st = s.rpc;
+  if (!st) return;
+  const keep = limitsOf(s).claimResultMs;
+  const used = /* @__PURE__ */ new Set();
+  for (const [k, c] of Object.entries(st.claims)) {
+    if (c.state !== "pending" && c.decidedAt !== void 0 && c.decidedAt + keep <= now) {
+      if (!c.resultExpired) {
+        delete c.result;
+        c.resultExpired = true;
+      }
+      const g = st.generations[c.generation];
+      if (!g || g.admitUntil < now) {
+        delete st.claims[k];
+        continue;
+      }
+    }
+    used.add(c.generation);
+  }
+  for (const [id, g] of Object.entries(st.generations)) if (g.admitUntil < now && !used.has(id)) delete st.generations[id];
+}
 
 // src/meter.ts
 var COUNTERS = ["writes", "reads", "takes", "misses", "events", "failures", "retries"];
@@ -580,19 +803,76 @@ var PiSpaces = class {
   now;
   meter;
   as;
+  space;
   /** `as`: the conversation acting (tools pass theirs). It owns what it creates and may only touch its own or
    * ownerless transactions and leases. Omitted (host code): unrestricted. */
-  constructor(host, ctx, now = Date.now, meter2 = meter, as) {
+  constructor(host, ctx, now = Date.now, meter2 = meter, as, o = {}) {
     this.meter = meter2;
     this.host = host;
     this.ctx = ctx;
     this.now = now;
     this.as = as;
+    this.space = o.space;
   }
-  async write(entry, txn = null, lease = ANY) {
-    const l = await this.host.commit(async (tx) => write(await tx.doc(Space), this.now(), entry, txn, lease, this.as), this.ctx);
-    this.meter.inc("writes");
-    return l;
+  /** This client's space document inside a commit (registers the default space on first use). */
+  doc(tx) {
+    return spaceDoc(tx, this.space, this.now());
+  }
+  /** Committed state for snapshot reads. The default space reads its document directly, even before registration. */
+  async snap() {
+    if (this.space === void 0) return this.host.snapshot(Space, this.ctx);
+    const id = await this.idOf();
+    const r = await this.host.snapshot(Registry, this.ctx);
+    return id === r?.defaultSpaceId ? this.host.snapshot(Space, this.ctx) : this.host.snapshot(NamedSpace, id, this.ctx);
+  }
+  async idOf() {
+    const r = await this.host.snapshot(Registry, this.ctx);
+    const id = r && this.space !== void 0 ? r.aliases[this.space] ?? (r.spaces[this.space] ? this.space : void 0) : void 0;
+    if (id === void 0) throw new UnknownSpaceError(`unknown space: ${this.space}`);
+    return id;
+  }
+  async watch() {
+    if (this.space === void 0) return this.host.watchDoc(Space, this.ctx);
+    const r = await this.host.snapshot(Registry, this.ctx);
+    const id = await this.idOf();
+    return id === r?.defaultSpaceId ? this.host.watchDoc(Space, this.ctx) : this.host.watchDoc(NamedSpace, id, this.ctx);
+  }
+  async write(entry, txn = null, lease = ANY, o = {}) {
+    const r = await this.mutate("write", { entry, txn, lease }, o.request, (s, now) => write(s, now, entry, txn, lease, this.as));
+    if (r.fresh) this.meter.inc("writes");
+    return r.value;
+  }
+  /**
+   * An immediate mutation, optionally under a request identity: claim check, effect and stored result in one commit.
+   * `fresh` is false for a replay (the stored result, nothing executed).
+   */
+  async mutate(method, args, request, fn) {
+    return this.host.commit(async (tx) => {
+      const s = await this.doc(tx);
+      const now = this.now();
+      if (!request) return { value: fn(s, now), fresh: true };
+      const ad = admit(s, now, request, method, plain(args), FOREVER);
+      if (ad.kind === "done") return { value: plain(ad.result), fresh: false };
+      if (ad.kind === "cancelled") throw new OperationCancelled(`request ${request.requestId} was cancelled`);
+      const value = fn(s, now);
+      decide(s, now, ad.key, { state: "done", result: plain(value ?? null) });
+      return { value, fresh: true };
+    }, this.ctx);
+  }
+  /** A new request generation for `principal`, in this space. Request ids are admitted while it is open. */
+  issueGeneration(principal) {
+    return this.host.commit(async (tx) => issueGeneration(await this.doc(tx), this.now(), principal), this.ctx);
+  }
+  /** State of a known request, read without a commit. An unknown id is RequestExpired, never a new operation. */
+  async pollOperation(target) {
+    const s = await this.snap();
+    if (!s) throw new RequestExpired(`request ${target.requestId} is unknown`);
+    return lookup(s, target, this.now());
+  }
+  /** Cancel a pending request (a blocked call then ends with OperationCancelled); a decided one is returned as is. */
+  async cancelOperation(target, o = {}) {
+    const r = await this.mutate("cancelOperation", { target }, o.request, (s, now) => cancelRequest(s, now, target));
+    return r.value;
   }
   read(tmpl2, timeout, o = {}) {
     return this.op(tmpl2, timeout, o, false, false);
@@ -609,57 +889,59 @@ var PiSpaces = class {
   /** `target` is the conversation that receives the events; without one they would have nobody to go to. */
   async notify(tmpl2, o) {
     if (o.target == null || o.target === "") throw new IllegalArgumentError("notify needs a target conversation");
-    return this.host.commit(async (tx) => notify(await tx.doc(Space), this.now(), tmpl2, o.txn ?? null, o.lease ?? ANY, o.handback ?? null, o.target, this.as), this.ctx);
+    const args = { tmpl: tmpl2, target: o.target, txn: o.txn ?? null, lease: o.lease ?? ANY, handback: o.handback ?? null };
+    return (await this.mutate("notify", args, o.request, (s, now) => notify(s, now, tmpl2, o.txn ?? null, o.lease ?? ANY, o.handback ?? null, o.target, this.as))).value;
   }
   /** Park a read/take for a conversation. The space delivers the entry (or a timeout) to it as input later.
    * `timeout` may be FOREVER: the wait stays until served or cancelled, across restarts. */
   async wait(tmpl2, o) {
     if (o.target == null || o.target === "") throw new IllegalArgumentError("wait needs a target conversation");
-    return this.host.commit(async (tx) => addWaiter(await tx.doc(Space), this.now(), { template: tmpl2, take: o.take ?? true, target: o.target, timeout: o.timeout, ...o.txnLeaseMs === void 0 ? {} : { txnLeaseMs: o.txnLeaseMs }, handback: o.handback ?? null, ...this.as === void 0 ? {} : { as: this.as } }), this.ctx);
+    const w = { template: tmpl2, take: o.take ?? true, target: o.target, timeout: o.timeout, ...o.txnLeaseMs === void 0 ? {} : { txnLeaseMs: o.txnLeaseMs }, handback: o.handback ?? null };
+    return (await this.mutate("wait", w, o.request, (s, now) => addWaiter(s, now, { ...w, ...this.as === void 0 ? {} : { as: this.as } }))).value;
   }
   /** Quotas for conversations in this space (host code only; stored in the document). */
   setLimits(l) {
     if (this.as !== void 0) throw new IllegalArgumentError("only host code may change limits");
-    return this.host.commit(async (tx) => setLimits(await tx.doc(Space), l), this.ctx);
+    return this.host.commit(async (tx) => setLimits(await this.doc(tx), l), this.ctx);
   }
   /**
    * Every entry a `read` with this template would currently see (oldest first, at most `limit`, default and maximum
    * 1000). A snapshot read: no commit, no lock, nothing is removed and nobody is woken, so it suits dashboards.
    */
   async readAll(tmpl2 = null, o = {}) {
-    const s = await this.host.snapshot(Space, this.ctx);
+    const s = await this.snap();
     const out = s ? list(s, this.now(), tmpl2, o.txn ?? null, o.limit, this.as) : [];
     this.meter.inc("reads");
     return out;
   }
   /** Number of entries a `read` with this template would currently see. No commit, no waiting. */
   async count(tmpl2 = null, txn = null) {
-    const s = await this.host.snapshot(Space, this.ctx);
+    const s = await this.snap();
     return s ? count(s, this.now(), tmpl2, txn) : 0;
   }
   /** Point-in-time gauges: visible entries (total and per type), locked, uncommitted, transactions, waiters, ... */
   async stats() {
-    const s = await this.host.snapshot(Space, this.ctx);
+    const s = await this.snap();
     return stats(s ?? initialState(), this.now());
   }
   /** A frozen canonical copy. JavaSpaces' snapshot is a serialization cache; this keeps the contract only. */
   snapshot(entry) {
     return { entry: Object.freeze(structuredClone(entry)) };
   }
-  createTransaction(lease = ANY) {
-    return this.host.commit(async (tx) => createTxn(await tx.doc(Space), this.now(), lease, this.as), this.ctx);
+  async createTransaction(lease = ANY, o = {}) {
+    return (await this.mutate("txn.begin", { lease }, o.request, (s, now) => createTxn(s, now, lease, this.as))).value;
   }
-  commit(txn) {
-    return this.host.commit(async (tx) => commitTxn(await tx.doc(Space), this.now(), txn, this.as), this.ctx);
+  async commit(txn, o = {}) {
+    await this.mutate("txn.commit", { txn }, o.request, (s, now) => commitTxn(s, now, txn, this.as));
   }
-  abort(txn) {
-    return this.host.commit(async (tx) => abortTxn(await tx.doc(Space), this.now(), txn, this.as), this.ctx);
+  async abort(txn, o = {}) {
+    await this.mutate("txn.abort", { txn }, o.request, (s, now) => abortTxn(s, now, txn, this.as));
   }
-  renew(leaseId, ms2) {
-    return this.host.commit(async (tx) => renew(await tx.doc(Space), this.now(), leaseId, ms2, this.as), this.ctx);
+  async renew(leaseId, ms2, o = {}) {
+    return (await this.mutate("lease.renew", { leaseId, ms: ms2 }, o.request, (s, now) => renew(s, now, leaseId, ms2, this.as))).value;
   }
-  cancel(leaseId) {
-    return this.host.commit(async (tx) => cancel(await tx.doc(Space), this.now(), leaseId, this.as), this.ctx);
+  async cancel(leaseId, o = {}) {
+    await this.mutate("lease.cancel", { leaseId }, o.request, (s, now) => cancel(s, now, leaseId, this.as));
   }
   /**
    * Debounce: after a change wakes a blocked op, wait a moment (jittered) before probing again, so a burst of writes
@@ -674,12 +956,14 @@ var PiSpaces = class {
   }
   /** `timeout` may be FOREVER. Long waits sleep in timer-sized chunks; every wake-up re-probes, so nothing is lost. */
   async op(tmpl2, timeout, o, take, ifExists) {
-    const deadline = o.deadline ?? deadlineOf(this.now(), timeout);
+    let deadline = o.deadline ?? deadlineOf(this.now(), timeout);
+    const method = `${take ? "take" : "read"}${ifExists ? "IfExists" : ""}`;
+    const args = { tmpl: tmpl2, timeout, deadline: o.deadline ?? null, txn: o.txn ?? null };
     const txn = o.txn ?? null;
     await this.host.commit(async (tx) => {
-      await tx.doc(Space);
+      await this.doc(tx);
     }, this.ctx);
-    const watch = await this.host.watchDoc(Space, this.ctx);
+    const watch = await this.watch();
     let dirty = false;
     let poke = () => {
     };
@@ -693,18 +977,31 @@ var PiSpaces = class {
         dirty = false;
         const r = await this.host.commit(async (tx) => {
           const prior = o.once ? await o.once.get(tx) : void 0;
-          if (prior !== void 0) return { status: "replay", value: prior };
-          const s = await tx.doc(Space);
+          if (prior !== void 0) return { status: "replay", value: plain(prior) };
+          const s = await this.doc(tx);
           const now = this.now();
+          let key;
+          let dl = deadline;
+          if (o.request) {
+            const ad = admit(s, now, o.request, method, plain(args), deadline);
+            if (ad.kind === "done") return { status: "replay", value: plain(ad.result) };
+            if (ad.kind === "cancelled") return { status: "cancelled" };
+            key = ad.key;
+            dl = ad.deadline;
+          }
           const p = probe(s, now, tmpl2, txn, take, this.as);
-          const miss = p.status !== "found" && (p.status === "none" && ifExists || deadline <= now);
-          if (o.once && (p.status === "found" || miss)) await o.once.set(tx, p.status === "found" ? view2(p.entry) : null);
-          return { ...p, miss, next: nextExpiry(s) };
+          const miss = p.status !== "found" && (p.status === "none" && ifExists || dl <= now);
+          const outcome = p.status === "found" ? view2(p.entry, s.spaceId) : null;
+          if (o.once && (p.status === "found" || miss)) await o.once.set(tx, outcome);
+          if (key && (p.status === "found" || miss)) decide(s, now, key, { state: "done", result: outcome });
+          return { ...p, miss, next: nextExpiry(s), spaceId: s.spaceId, deadline: dl };
         }, this.ctx);
         if (r.status === "replay") return r.value;
+        if (r.status === "cancelled") throw new OperationCancelled(`request ${o.request?.requestId} was cancelled`);
+        deadline = r.deadline;
         if (r.status === "found") {
           this.meter.inc(take ? "takes" : "reads");
-          return view2(r.entry);
+          return view2(r.entry, r.spaceId);
         }
         if (r.miss) {
           this.meter.inc("misses");
@@ -731,24 +1028,9 @@ var PiSpaces = class {
   }
 };
 
-// src/canonical.ts
-function canonicalJson(v) {
-  if (v === null || typeof v === "boolean" || typeof v === "string") return JSON.stringify(v);
-  if (typeof v === "number") {
-    if (!Number.isFinite(v)) throw new TypeError("canonical JSON: non-finite number");
-    return JSON.stringify(Object.is(v, -0) ? 0 : v);
-  }
-  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
-  if (typeof v === "object") {
-    const keys = Object.keys(v).filter((k) => v[k] !== void 0).sort();
-    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(v[k])}`).join(",")}}`;
-  }
-  throw new TypeError(`canonical JSON: unsupported ${typeof v}`);
-}
-
 // src/index.ts
 var MAX_WAIT_MS = 6e4;
-var Claim = defineDoc2({
+var Claim = defineDoc3({
   kind: "pi-spaces.claim",
   version: 1,
   scope: "task",
@@ -792,8 +1074,8 @@ function createSpaces(meter2 = meter) {
         execute: async (a, api, ctx) => {
           const r = await api.commit(async (tx) => {
             const c = await tx.doc(Claim, api.taskId);
-            if (c.done) return { lease: c.value, fresh: false };
-            const l = write(await tx.doc(Space), Date.now(), { type: a.type, ...a.types ? { types: a.types } : {}, fields: a.fields }, a.txn ?? null, ms(a.ttlMs, ANY), api.conversationId);
+            if (c.done) return { lease: plain(c.value), fresh: false };
+            const l = write(await spaceDoc(tx, void 0, Date.now()), Date.now(), { type: a.type, ...a.types ? { types: a.types } : {}, fields: a.fields }, a.txn ?? null, ms(a.ttlMs, ANY), api.conversationId);
             c.done = true;
             c.value = l;
             return { lease: l, fresh: true };
@@ -846,8 +1128,8 @@ function createSpaces(meter2 = meter) {
           if (a.action !== "begin" && !a.txn) throw new IllegalArgumentError("txn required");
           return text(await api.commit(async (tx) => {
             const c = await tx.doc(Claim, api.taskId);
-            if (c.done) return c.value;
-            const sp = await tx.doc(Space), now = Date.now();
+            if (c.done) return plain(c.value);
+            const now = Date.now(), sp = await spaceDoc(tx, void 0, now);
             let r = "ok";
             if (a.action === "begin") r = createTxn(sp, now, ms(a.leaseMs, ANY), api.conversationId);
             else if (a.action === "commit") commitTxn(sp, now, a.txn, api.conversationId);
@@ -866,8 +1148,8 @@ function createSpaces(meter2 = meter) {
         execute: async (a, api, ctx) => {
           const id = await api.commit(async (tx) => {
             const c = await tx.doc(Claim, api.taskId);
-            if (c.done) return c.value;
-            const w = addWaiter(await tx.doc(Space), Date.now(), { template: tmpl(a), take: a.mode !== "read", target: api.conversationId, timeout: ms(a.timeoutMs, FOREVER), txnLeaseMs: ms(a.txnLeaseMs, ANY), handback: a.handback ?? null, as: api.conversationId });
+            if (c.done) return plain(c.value);
+            const w = addWaiter(await spaceDoc(tx, void 0, Date.now()), Date.now(), { template: tmpl(a), take: a.mode !== "read", target: api.conversationId, timeout: ms(a.timeoutMs, FOREVER), txnLeaseMs: ms(a.txnLeaseMs, ANY), handback: a.handback ?? null, as: api.conversationId });
             c.done = true;
             c.value = w;
             return w;
@@ -883,8 +1165,8 @@ function createSpaces(meter2 = meter) {
         execute: async (a, api, ctx) => {
           const r = await api.commit(async (tx) => {
             const c = await tx.doc(Claim, api.taskId);
-            if (c.done) return c.value;
-            const n = notify(await tx.doc(Space), Date.now(), tmpl(a), null, ms(a.ttlMs, ANY), a.handback ?? null, api.conversationId, api.conversationId);
+            if (c.done) return plain(c.value);
+            const n = notify(await spaceDoc(tx, void 0, Date.now()), Date.now(), tmpl(a), null, ms(a.ttlMs, ANY), a.handback ?? null, api.conversationId, api.conversationId);
             c.done = true;
             c.value = n;
             return n;
@@ -899,8 +1181,8 @@ function createSpaces(meter2 = meter) {
         replay: "safe",
         execute: async (a, api, ctx) => text(await api.commit(async (tx) => {
           const c = await tx.doc(Claim, api.taskId);
-          if (c.done) return c.value;
-          const sp = await tx.doc(Space), now = Date.now();
+          if (c.done) return plain(c.value);
+          const now = Date.now(), sp = await spaceDoc(tx, void 0, now);
           let r = "ok";
           if (a.action === "renew") r = renew(sp, now, a.id, ms(a.ms, ANY), api.conversationId);
           else cancel(sp, now, a.id, api.conversationId);
@@ -942,7 +1224,7 @@ var MAX_TRIES = 5;
 async function deliverEvents(harness, ctx, o = {}) {
   const now = o.now ?? Date.now;
   const retryMs = o.retryMs ?? 1e3;
-  const snap = await harness.snapshot(Space, ctx);
+  const snap = await snapshotOf(harness, o.space, ctx);
   const events = (snap?.outbox ?? []).filter((e) => (e.retryAt ?? 0) <= now());
   const done = /* @__PURE__ */ new Set();
   const dropped = /* @__PURE__ */ new Set();
@@ -976,7 +1258,7 @@ async function deliverEvents(harness, ctx, o = {}) {
   const gaveUp = [];
   let undeliverable = 0;
   await harness.commit(async (tx) => {
-    const s = await tx.doc(Space);
+    const s = await spaceDoc(tx, o.space, now());
     s.outbox = s.outbox.filter((x) => !done.has(key(x)));
     for (const x of s.outbox) if (failed.has(key(x))) {
       x.tries = (x.tries ?? 0) + 1;
@@ -1001,6 +1283,20 @@ async function deliverEvents(harness, ctx, o = {}) {
   if (failed.size) m.inc("retries", failed.size);
   for (const g of gaveUp) (o.onError ?? ((e) => console.error("pi-spaces delivery:", e)))(new Error(g));
   return done.size;
+}
+async function snapshotOf(harness, space, ctx) {
+  if (space === void 0) return harness.snapshot(Space, ctx);
+  const r = await harness.snapshot(Registry, ctx);
+  const id = r?.aliases[space] ?? (r?.spaces[space] ? space : void 0);
+  if (id === void 0) return void 0;
+  return id === r?.defaultSpaceId ? harness.snapshot(Space, ctx) : harness.snapshot(NamedSpace, id, ctx);
+}
+async function watchOf(harness, space, ctx) {
+  if (space === void 0) return harness.watchDoc(Space, ctx);
+  const r = await harness.snapshot(Registry, ctx);
+  const id = r?.aliases[space] ?? (r?.spaces[space] ? space : void 0);
+  if (id === void 0 || id === r?.defaultSpaceId) return harness.watchDoc(Space, ctx);
+  return harness.watchDoc(NamedSpace, id, ctx);
 }
 function serialized(fn) {
   let running;
@@ -1038,8 +1334,9 @@ async function startMaintenance(harness, ctx, o = {}) {
     clearTimeout(timer);
     try {
       const next = await harness.commit(async (tx) => {
-        const s = await tx.doc(Space);
+        const s = await spaceDoc(tx, o.space, now());
         settle(s, now());
+        sweep(s, now());
         return nextExpiry(s);
       }, ctx);
       if (next < FOREVER) arm(next - now());
@@ -1049,9 +1346,9 @@ async function startMaintenance(harness, ctx, o = {}) {
     }
   });
   await harness.commit(async (tx) => {
-    await tx.doc(Space);
+    await spaceDoc(tx, o.space, now());
   }, ctx);
-  const watch = await harness.watchDoc(Space, ctx);
+  const watch = await watchOf(harness, o.space, ctx);
   watch?.start(tick);
   await tick();
   return async () => {
@@ -1061,8 +1358,41 @@ async function startMaintenance(harness, ctx, o = {}) {
   };
 }
 async function startService(harness, ctx, o = {}) {
-  const stops = [await startMaintenance(harness, ctx, o), await startDelivery(harness, ctx, o)];
+  const stops = [];
+  const one = async (space) => {
+    stops.push(await startMaintenance(harness, ctx, { ...o, space }), await startDelivery(harness, ctx, { ...o, space }));
+  };
+  if (o.space !== void 0) {
+    await one(o.space);
+    return async () => {
+      for (const stop of stops) await stop();
+    };
+  }
+  await one(void 0);
+  const served = /* @__PURE__ */ new Set();
+  let stopped = false;
+  const addNew = serialized(async () => {
+    if (stopped) return;
+    try {
+      const r = await harness.snapshot(Registry, ctx);
+      for (const i of await listSpaces(harness, ctx)) {
+        if (served.has(i.spaceId) || i.spaceId === r?.defaultSpaceId) continue;
+        served.add(i.spaceId);
+        await one(i.spaceId);
+      }
+    } catch (e) {
+      (o.onError ?? ((x) => console.error("pi-spaces service:", x)))(e);
+    }
+  });
+  await harness.commit(async (tx) => {
+    await tx.doc(Registry);
+  }, ctx);
+  const watch = await harness.watchDoc(Registry, ctx);
+  watch?.start(addNew);
+  await addNew();
   return async () => {
+    stopped = true;
+    await watch?.stop();
     for (const stop of stops) await stop();
   };
 }
@@ -1077,7 +1407,7 @@ async function startDelivery(harness, ctx, o = {}) {
     try {
       await deliverEvents(harness, ctx, o);
       let next = Infinity;
-      for (const e of (await harness.snapshot(Space, ctx))?.outbox ?? []) if (e.retryAt !== void 0) next = Math.min(next, e.retryAt);
+      for (const e of (await snapshotOf(harness, o.space, ctx))?.outbox ?? []) if (e.retryAt !== void 0) next = Math.min(next, e.retryAt);
       if (next < Infinity && !stopped) timer = setTimeout(() => void run(), timerDelay(next - (o.now ?? Date.now)()));
     } catch (e) {
       onError(e);
@@ -1085,9 +1415,9 @@ async function startDelivery(harness, ctx, o = {}) {
     }
   });
   await harness.commit(async (tx) => {
-    await tx.doc(Space);
+    await spaceDoc(tx, o.space, (o.now ?? Date.now)());
   }, ctx);
-  const watch = await harness.watchDoc(Space, ctx);
+  const watch = await watchOf(harness, o.space, ctx);
   watch?.start(run);
   await run();
   return async () => {
@@ -1099,25 +1429,41 @@ async function startDelivery(harness, ctx, o = {}) {
 export {
   ANY,
   COUNTERS,
+  DEFAULT_ALIAS,
   DEFAULT_LIMITS,
   FOREVER,
   IllegalArgumentError,
+  IncarnationChanged,
   LimitError,
   Meter,
   NO_WAIT,
+  NamedSpace,
+  OperationCancelled,
   PermissionError,
   PiSpaces,
+  Registry,
+  RequestConflict,
+  RequestExpired,
+  ResultExpired,
   Space,
   TransactionError,
   UnknownLeaseError,
+  UnknownSpaceError,
   WAKE_DEBOUNCE_MS,
+  argHash,
   canonicalJson,
+  claims_exports as claims,
   core_exports as core,
+  createSpace,
   createSpaces,
   deliverEvents,
   formatStatus,
   formatWidget,
+  listSpaces,
   meter,
+  resolveSpaceId,
+  snapshotSpace,
+  spaceDoc,
   spaces,
   startDelivery,
   startMaintenance,
