@@ -117,7 +117,9 @@ The session list is a pi-durable document (`app.sessions`) in
 conversation; an old `sessions.json` is imported once. Deleting a session first
 aborts its running work, then removes its registry entry, so it no longer
 appears or can be attached through Remote. Its transcript is kept in SQLite; it
-is not a destructive purge. The state directory is `0700` and the socket `0600`. `pi-client` runs
+is not a destructive purge. Existing attachments reject further calls after deletion;
+mutating calls are serialized with deletion so new work cannot slip past its abort.
+The state directory is `0700` and the socket `0600`. `pi-client` runs
 on the phone as the protocol client, while the durable harness, model calls,
 and tools run in `pi-serverd` on the remote host. For the full interactive Pi
 TUI instead, use **Clients → ▸_** or **pi CLI (ssh)**; run it in `tmux` when an
@@ -170,8 +172,8 @@ Each sensitive step asks first.
 
 **pi-serverd.** A new release is unpacked and dependency-checked in a private
 staging directory first. Only after that succeeds is the daemon stopped and the
-release directory atomically swapped; a failed restart restores the preceding
-release. The daemon PID is read from its own lock file (not a global `pkill`),
+release directory swapped using same-filesystem renames; a failed swap (including
+failure between the renames) or restart restores and restarts the preceding release. The daemon PID is read from its own lock file (not a global `pkill`),
 and its Unix socket plus `sessions.list` protocol call are health-checked. The
 daemon runs in the tmux session `pi-serverd`; missing tmux is installed through
 apt / dnf / yum / pacman / apk / zypper / brew / Termux `pkg` when running as
@@ -185,7 +187,8 @@ after 10 s) and removes the `pi-serverd` tmux session. It answers
 `{ok, stopped}`; `stopped:false` means no daemon was running.
 
 **Version check.** The installed state is a SHA-256 (16 hex chars) over
-`pi-serverd.mjs`, `common.mjs`, `package.json` and `package-lock.json`, stored in
+`pi-serverd.mjs`, `common.mjs`, `pi-spaces.mjs`, `package.json`, `package-lock.json`
+and the optional generated `space-examples/` directory, stored in
 `~/.pi-mobile-remote/runtime/.version` (`.deps` holds the dependency hash). Any
 difference to the files on the phone means *outdated*; declining the update keeps
 the old daemon.
@@ -242,6 +245,21 @@ Toolchain notes:
   `RUNTIME_VERSION` in `RuntimeInstaller.java` covers installer behavior changes. An upgrade replaces `usr/` and `runtime/` entirely
   (archives are streamed into tar); `home/` and `work/` are kept.
 
+## Remote regression tests
+
+```bash
+cd runtime
+npm ci --ignore-scripts
+npm test
+```
+
+These offline tests need Node >=22.19.0, bash and tar; no SSH host, API keys or
+model calls are needed. They cover rename routing, deleted-session attachments,
+prompt deduplication, release rollback/restart, SSH/protocol/RPC deadlines and
+connection cancellation races. Metadata and protocol connection attempts time out
+after 15 seconds; RPC calls after 35 seconds (including 25-second event polls).
+Disconnect cancels pending connection and recovery operations.
+
 ## Repackaging assets
 
 Every Android build runs `scripts/prepare-runtime.py` before `preBuild`. It rebuilds pi-spaces from the
@@ -252,8 +270,10 @@ re-extracted on the device without a manual version bump. Unchanged files keep t
 Build prerequisites: Python 3, installed mobile runtime dependencies and the prepared rootfs asset.
 Refreshing from source additionally needs Node/npm and the pi-spaces development dependencies.
 Set `PI_SPACES_SOURCE` for a source checkout elsewhere. If the source is missing or incompatible, the
-Android build warns and uses the existing mobile bundles. Missing required bundles still fail the build;
-errors while building an available source checkout are also reported as build failures.
+Android build warns and uses the existing mobile bundles. The checked-in `pi-spaces.mjs` is required;
+generated `space-examples/` CLI programs are optional, so a fresh checkout can run tests and provision
+a remote host without the sibling source tree. Available examples are still packaged, hashed and
+uploaded. Errors while building an available source checkout are reported as build failures.
 Running `npm run bundle` in pi-spaces also synchronizes this checkout automatically; an alternate mobile
 checkout can be selected with `PI_SPACES_MOBILE_ROOT`. Generated example modules are CLI programs,
 not additional mobile buttons or Federation services. Remote provisioning includes them in its release hash

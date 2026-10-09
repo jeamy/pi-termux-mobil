@@ -3,13 +3,24 @@
 import { spawn } from 'node:child_process';
 import { createGzip } from 'node:zlib';
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { setTimeout as sleep } from 'node:timers/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { attachRemote, parseSshTarget, sshBaseOptions } from './remote-client.mjs';
+import { attachRemote, parseSshTarget, sshBaseOptions, withDeadline } from './remote-client.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-export const REMOTE_FILES = ['pi-serverd.mjs', 'common.mjs', 'pi-spaces.mjs', 'space-examples', 'package.json', 'package-lock.json'];
+export const REMOTE_FILES = ['pi-serverd.mjs', 'common.mjs', 'pi-spaces.mjs', 'package.json', 'package-lock.json'];
+// Generated CLI examples are optional, not needed by the daemon. Hash and
+// upload the same manifest so a fresh checkout remains deployable.
+export function remoteFiles(root = ROOT) {
+  const files = [...REMOTE_FILES];
+  if (existsSync(path.join(root, 'space-examples'))) files.push('space-examples');
+  for (const file of files) {
+    if (!existsSync(path.join(root, file))) throw new Error(`Required remote runtime file missing: ${file}; restore the runtime bundle first`);
+  }
+  return files;
+}
 export const REMOTE_DIR = '.pi-mobile-remote/runtime';
 export const TMUX_SESSION = 'pi-serverd';
 export const PRELUDE = 'export PATH="$HOME/.local/bin:$HOME/.volta/bin:$HOME/.asdf/shims:$HOME/.nodenv/shims:/opt/homebrew/bin:/usr/local/bin:$PATH"; '
@@ -18,7 +29,7 @@ export const PRELUDE = 'export PATH="$HOME/.local/bin:$HOME/.volta/bin:$HOME/.as
 
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 export const remoteBash = (script) => `bash -l -c "$(echo ${Buffer.from(PRELUDE + script).toString('base64')} | base64 -d)"`;
-export function runtimeHash(root = ROOT, files = REMOTE_FILES) {
+export function runtimeHash(root = ROOT, files = remoteFiles(root)) {
   const h = createHash('sha256');
   const hashPath = (relative) => {
     const full = path.join(root, relative);
@@ -41,8 +52,8 @@ function makeCtx(ssh, prefix) {
   return { prefix, host, port, home: process.env.HOME || '/tmp' };
 }
 
-export function sshRun({ prefix, host, port, home }, script, { stdin, onLine, timeoutMs = 60_000 } = {}) {
-  return new Promise((resolve, reject) => {
+export function sshRun({ prefix, host, port, home }, script, { stdin, onLine, timeoutMs = 60_000, signal } = {}) {
+  return withDeadline((bounded) => new Promise((resolve, reject) => {
     const c = spawn(`${prefix}/bin/ssh`, [...sshBaseOptions(home, port), '--', host, remoteBash(script)], { env: process.env });
     let out = '', err = '', done = false;
     const tail = (v, d) => (v + d).slice(-32_768); // don't keep unlimited npm output
@@ -58,12 +69,20 @@ export function sshRun({ prefix, host, port, home }, script, { stdin, onLine, ti
     };
     c.stdout.on('data', (d) => { out = tail(out, d); emit(d); });
     c.stderr.on('data', (d) => { err = tail(err, d); emit(d); });
-    const timer = setTimeout(() => { c.kill('SIGKILL'); finish(new Error(`ssh timeout after ${timeoutMs / 1000}s`)); }, timeoutMs);
-    const finish = (e, code) => { if (done) return; done = true; clearTimeout(timer); if (e) reject(e); else resolve({ code, out: out.trim(), err: err.trim() }); };
+    const abort = () => { c.kill('SIGKILL'); finish(bounded.reason); };
+    const finish = (e, code) => {
+      if (done) return;
+      done = true;
+      bounded.removeEventListener('abort', abort);
+      if (e) reject(e); else resolve({ code, out: out.trim(), err: err.trim() });
+    };
+    bounded.addEventListener('abort', abort, { once: true });
     c.on('error', finish);
+    // Early SSH failure during upload must not crash the bridge with EPIPE.
+    c.stdin.on('error', (e) => { c.kill('SIGKILL'); finish(e); });
     c.on('close', (code) => finish(null, code));
     if (stdin !== undefined) c.stdin.end(stdin); else c.stdin.end();
-  });
+  }), { timeoutMs, signal });
 }
 
 // The lock is owned by pi-serverd. Inspect /proc for the exact PID and expected
@@ -83,8 +102,8 @@ echo "nm=$([ -d "$D/node_modules/@earendil-works/pi-server" ] && echo 1 || echo 
 ${PID}
 if [ "$p" != 0 ] && [ -S "$HOME/.pi-serverd/server.sock" ]; then echo running=1; else echo running=0; fi
 `;
-async function probeHost(ctx) {
-  const r = await sshRun(ctx, PROBE);
+async function probeHost(ctx, signal) {
+  const r = await sshRun(ctx, PROBE, { signal });
   if (r.code !== 0) throw new Error(`ssh login failed (${r.code}): ${r.err || 'no stderr'}`);
   return Object.fromEntries(r.out.split('\n').map((l) => l.split(/=(.*)/s).slice(0, 2)));
 }
@@ -92,8 +111,8 @@ export const probeRemote = ({ ssh, prefix = '' }) => probeHost(makeCtx(ssh, pref
 const COPY_AUTH = 'umask 077; mkdir -p "$HOME/.pi/agent" && chmod 700 "$HOME/.pi/agent" && '
   + 'test ! -e "$HOME/.pi/agent/auth.json" && cat > "$HOME/.pi/agent/auth.json.tmp" && '
   + 'chmod 600 "$HOME/.pi/agent/auth.json.tmp" && ln "$HOME/.pi/agent/auth.json.tmp" "$HOME/.pi/agent/auth.json" && rm "$HOME/.pi/agent/auth.json.tmp"';
-export async function copyAuthTo({ ssh, prefix = '', authFile }) {
-  const r = await sshRun(makeCtx(ssh, prefix), COPY_AUTH, { stdin: readFileSync(authFile) });
+export async function copyAuthTo({ ssh, prefix = '', authFile, signal }) {
+  const r = await sshRun(makeCtx(ssh, prefix), COPY_AUTH, { stdin: readFileSync(authFile), signal });
   if (r.code !== 0) throw new Error(`auth.json upload failed: ${r.err || 'file already exists?'}`);
 }
 
@@ -112,7 +131,8 @@ elif command -v brew >/dev/null 2>&1; then brew install tmux
 fi
 command -v tmux >/dev/null 2>&1 && echo tmux-installed
 true`;
-const STOP = `${PID} [ "$p" != 0 ] || exit 1; kill -TERM "$p"; for i in $(seq 1 20); do kill -0 "$p" 2>/dev/null || exit 0; sleep .5; done; kill -KILL "$p" 2>/dev/null;`;
+const STOP_PROCESS = 'kill -TERM "$p" 2>/dev/null || true; for i in $(seq 1 20); do kill -0 "$p" 2>/dev/null || break; sleep .5; done; if kill -0 "$p" 2>/dev/null; then kill -KILL "$p" || exit 1; fi;';
+const STOP = `${PID} [ "$p" != 0 ] || exit 1; ${STOP_PROCESS}`;
 // Stop the daemon on the host (also ends its tmux session, since node is exec'd in it).
 // Returns false when no pi-serverd was running. Next connect provisions/updates again.
 export async function stopRemoteServer({ ssh, prefix = '', log = () => {} }) {
@@ -127,27 +147,40 @@ export async function stopRemoteServer({ ssh, prefix = '', log = () => {} }) {
 const RUN_CMD = `${PRELUDE}cd "$HOME/${REMOTE_DIR}" && exec node pi-serverd.mjs`;
 const START_TMUX = `tmux has-session -t ${TMUX_SESSION} 2>/dev/null && exit 1; tmux new-session -d -s ${TMUX_SESSION} ${shq(`exec bash -l -c ${shq(RUN_CMD)}`)}`;
 const START_NOHUP = `cd "$HOME/${REMOTE_DIR}" || exit 1; if command -v setsid >/dev/null 2>&1; then L=setsid; else L=""; fi; nohup $L bash -l -c ${shq(RUN_CMD)} >> "$HOME/${REMOTE_DIR}/serverd.log" 2>&1 < /dev/null &`;
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** Recover a promoted release OR the gap between renames. Inspect remote
+ * markers instead of relying on a local 'swapped' flag after a lost response.
+ */
+export function rollbackReleaseScript(base, want) {
+  return `if [ "$(cat "${base}/runtime/.version" 2>/dev/null)" = ${shq(want)} ]; then
+    ${PID} if [ "$p" != 0 ]; then ${STOP_PROCESS} fi
+    rm -rf "${base}/runtime.failed" && mv "${base}/runtime" "${base}/runtime.failed" || exit 1
+  fi
+  if [ ! -e "${base}/runtime" ] && [ -d "${base}/runtime.prev" ]; then
+    mv "${base}/runtime.prev" "${base}/runtime" || exit 1
+  fi`;
+}
 
-export async function ensureRemoteServer({ ssh, prefix = '', log = () => {}, copyAuth = false, allowUpdate = false, authFile }) {
+export async function ensureRemoteServer({ ssh, prefix = '', log = () => {}, copyAuth = false, allowUpdate = false, authFile, signal }) {
   const ctx = makeCtx(ssh, prefix);
-  const run = (cmd, opts) => sshRun(ctx, cmd, { onLine: log, ...opts });
+  const run = (cmd, opts) => sshRun(ctx, cmd, { onLine: log, signal, ...opts });
   log('checking remote host…');
-  const info = await probeHost(ctx);
+  const info = await probeHost(ctx, signal);
   if (info.auth !== '1') {
-    if (copyAuth && authFile) { await copyAuthTo({ ssh, prefix, authFile }); log('auth.json copied'); }
+    if (copyAuth && authFile) { await copyAuthTo({ ssh, prefix, authFile, signal }); log('auth.json copied'); }
     else log('WARNING: no auth.json on host; no models available');
   }
-  const want = runtimeHash(), deps = runtimeHash(ROOT, ['package.json', 'package-lock.json']);
+  const files = remoteFiles();
+  const want = runtimeHash(ROOT, files), deps = runtimeHash(ROOT, ['package.json', 'package-lock.json']);
   const outdated = info.ver !== want;
   if (info.running === '1' && !outdated) {
     // A socket and PID can be stale or hung; verify the actual pi-server protocol.
     try {
-      const peer = await attachRemote({ ssh, prefix });
+      const peer = await attachRemote({ ssh, prefix, signal });
       try { await peer.list(); } finally { await peer.disconnect(); }
       log(`pi-serverd healthy (${want})`);
       return { started: false };
     } catch (e) {
+      signal?.throwIfAborted();
       log(`pi-serverd health check failed: ${e?.message || e}; restarting it`);
       const stopped = await run(STOP);
       if (stopped.code !== 0) throw new Error(`could not stop unhealthy daemon: ${stopped.err}`);
@@ -159,28 +192,33 @@ export async function ensureRemoteServer({ ssh, prefix = '', log = () => {}, cop
   if (!info.npm) throw new Error('npm not found on host');
   const base = `$HOME/.pi-mobile-remote`;
   const stage = `${base}/stage-${want}`;
-  let staged = false, swapped = false;
+  let staged = false, swapAttempted = false;
   try {
     if (outdated) {
       log(`staging pi-serverd ${want}…`);
       // build gzip tar in-process: avoids spawning external gzip (fails in Android sandbox)
-      const tarBuf = await new Promise((resolve, reject) => {
+      const tarBuf = await withDeadline((bounded) => new Promise((resolve, reject) => {
         const chunks = [];
         const gz = createGzip();
         gz.on('data', (d) => chunks.push(d));
         gz.on('end',  () => resolve(Buffer.concat(chunks)));
         gz.on('error', reject);
         const tarBin = prefix ? `${prefix}/bin/tar` : 'tar';
-        const t = spawn(tarBin, ['cf', '-', ...REMOTE_FILES], { cwd: ROOT });
+        const t = spawn(tarBin, ['cf', '-', ...files], { cwd: ROOT });
+        const abort = () => { t.kill('SIGKILL'); gz.destroy(); reject(bounded.reason); };
+        bounded.addEventListener('abort', abort, { once: true });
         t.stdout.pipe(gz);
         let tarErr = '';
         t.stderr.on('data', (d) => { tarErr += d; });
         t.on('error', reject);
-        t.on('close', (code) => { if (code !== 0) { gz.destroy(); reject(new Error(`tar failed (${code}): ${tarErr.trim()}`)); } });
-      });
+        t.on('close', (code) => {
+          bounded.removeEventListener('abort', abort);
+          if (code !== 0) { gz.destroy(); reject(new Error(`tar failed (${code}): ${tarErr.trim()}`)); }
+        });
+      }), { signal, timeoutMs: 60_000 });
+      staged = true;
       const uploaded = await run(`umask 077; mkdir -p "${base}" && rm -rf "${stage}" && mkdir "${stage}" && tar xzf - -C "${stage}"`, { stdin: tarBuf });
       if (uploaded.code !== 0) throw new Error(`upload failed: ${uploaded.err}`);
-      staged = true;
       if (info.deps === deps && info.nm === '1') {
         const copied = await run(`cp -a "${base}/runtime/node_modules" "${stage}/node_modules"`);
         if (copied.code !== 0) throw new Error(`dependency copy failed: ${copied.err}`);
@@ -205,19 +243,20 @@ export async function ensureRemoteServer({ ssh, prefix = '', log = () => {}, cop
       if (r.code !== 0) throw new Error(`could not stop old daemon: ${r.err}`);
     }
     if (staged) {
-      // Preserve the old release for rollback. All renames are within one filesystem.
+      // Mark BEFORE dispatch: failures between renames and lost SSH responses
+      // must both restore the preceding release and restart it.
+      swapAttempted = true;
       const r = await run(`rm -rf "${base}/runtime.prev" && { [ ! -e "${base}/runtime" ] || mv "${base}/runtime" "${base}/runtime.prev"; } && mv "${stage}" "${base}/runtime"`);
       if (r.code !== 0) throw new Error(`release swap failed: ${r.err}`);
-      swapped = true;
     }
     const start = await run(tmux ? START_TMUX : START_NOHUP);
     if (start.code !== 0) throw new Error(`daemon start failed: ${start.err || start.out}`);
     // Check for a live process AND a socket, not just a stale socket pathname.
     for (let i = 0; i < 40; i++) {
-      await sleep(750);
-      const p = await probeHost(ctx);
+      await sleep(750, undefined, { signal });
+      const p = await probeHost(ctx, signal);
       if (p.running === '1') {
-        const peer = await attachRemote({ ssh, prefix });
+        const peer = await attachRemote({ ssh, prefix, signal });
         try { await peer.list(); } finally { await peer.disconnect(); }
         log('pi-serverd answered sessions.list');
         return { started: true, mode: tmux ? 'tmux' : 'nohup' };
@@ -225,10 +264,19 @@ export async function ensureRemoteServer({ ssh, prefix = '', log = () => {}, cop
     }
     throw new Error('pi-serverd did not start in 30s');
   } catch (e) {
-    if (staged && !swapped) await run(`rm -rf "${stage}"`);
-    if (swapped) {
-      log(`start failed (${e.message}); rolling back…`);
-      await run(`${PID} if [ "$p" != 0 ]; then kill -TERM "$p" 2>/dev/null; fi; rm -rf "${base}/runtime.failed"; mv "${base}/runtime" "${base}/runtime.failed"; if [ -d "${base}/runtime.prev" ]; then mv "${base}/runtime.prev" "${base}/runtime"; ${START_NOHUP}; fi`);
+    // Recovery must still run after the caller cancelled provisioning.
+    try {
+      if (swapAttempted) {
+        log(`deployment failed (${e.message}); rolling back…`);
+        const r = await run(`${rollbackReleaseScript(base, want)}
+          if [ -d "${base}/runtime" ]; then
+            ${START_NOHUP}
+          fi`, { signal: undefined });
+        if (r.code !== 0) throw new Error(r.err || 'release restore failed');
+      }
+      if (staged) await run(`rm -rf "${stage}"`, { signal: undefined });
+    } catch (rollbackError) {
+      throw new Error(`${e.message}; rollback/cleanup failed: ${rollbackError.message}`, { cause: e });
     }
     throw e;
   }

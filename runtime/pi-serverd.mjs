@@ -79,6 +79,18 @@ async function conversationOf(sessionId) {
   return conv;
 }
 
+// Serialize session mutations with deletion. Revalidating only at attach time
+// leaves cached handles usable after removal; checking without serialization
+// also lets a concurrent prompt slip between deletion's abort and removal.
+const sessionMutations = new Map();
+async function withSessionMutation(id, invoke) {
+  const previous = sessionMutations.get(id) ?? Promise.resolve();
+  const pending = previous.catch(() => {}).then(invoke);
+  sessionMutations.set(id, pending);
+  try { return await pending; }
+  finally { if (sessionMutations.get(id) === pending) sessionMutations.delete(id); }
+}
+
 // --- routed session handles ---------------------------------------------------
 
 function routedSession(sessionId) {
@@ -93,54 +105,61 @@ function routedSession(sessionId) {
           if (call.serviceId !== 'chat') throw new Error(`unknown service: ${call.serviceId}`);
           const c = context ?? ctx;
           const arg = call.args[0] ?? {};
-          switch (call.member) {
-            case 'prompt': {
-              const text = String(arg.message ?? (typeof arg === 'string' ? arg : ''));
-              if (!(await ensureModel(conv, models, c))) {
-                throw new Error('no model: add a credential on the server');
+          const invoke = async () => {
+            // Existing attachments must lose access as soon as their registry
+            // entry is deleted. Never use the conversation cached by attach.
+            const conv = await conversationOf(sessionId);
+            switch (call.member) {
+              case 'prompt': {
+                const text = String(arg.message ?? (typeof arg === 'string' ? arg : ''));
+                if (!(await ensureModel(conv, models, c))) {
+                  throw new Error('no model: add a credential on the server');
+                }
+                const sub = await conv.submit({
+                  type: 'input',
+                  content: text,
+                  requestId: requestIdOf(arg.requestId), // exactly-once across retries
+                  whenBusy: whenBusyOf(arg.whenBusy),
+                }, c);
+                return { submissionId: sub.id };
               }
-              const sub = await conv.submit({
-                type: 'input',
-                content: text,
-                requestId: requestIdOf(arg.requestId), // exactly-once across retries
-                whenBusy: whenBusyOf(arg.whenBusy),
-              }, c);
-              return { submissionId: sub.id };
-            }
-            case 'abort':
-              await conv.abort(c);
-              return { ok: true };
-            case 'compact': {
-              const taskId = await conv.compact(typeof arg.instructions === 'string' ? arg.instructions : undefined, c);
-              return { ok: true, taskId };
-            }
-            case 'state': {
-              const view = await conv.viewState(c);
-              try { return { ...view.value, busy: isBusy(view) }; } finally { view.dispose?.(); }
-            }
-            case 'configure': {
-              if (arg.model?.provider && arg.model?.modelId) {
-                await conv.configure({ model: { provider: String(arg.model.provider), modelId: String(arg.model.modelId) } }, c);
+              case 'abort':
+                await conv.abort(c);
+                return { ok: true };
+              case 'compact': {
+                const taskId = await conv.compact(typeof arg.instructions === 'string' ? arg.instructions : undefined, c);
+                return { ok: true, taskId };
               }
-              return { ok: true };
+              case 'state': {
+                const view = await conv.viewState(c);
+                try { return { ...view.value, busy: isBusy(view) }; } finally { view.dispose?.(); }
+              }
+              case 'configure': {
+                if (arg.model?.provider && arg.model?.modelId) {
+                  await conv.configure({ model: { provider: String(arg.model.provider), modelId: String(arg.model.modelId) } }, c);
+                }
+                return { ok: true };
+              }
+              case 'history': {
+                // entries() is newest-first; the UI needs chronological messages.
+                const limit = Math.min(Math.max(Number(arg.limit) || 200, 1), 500);
+                // position before the page: nothing is lost; repeats are deduped by entry id in the UI
+                const position = await events.position(sessionId);
+                const page = await conv.entries({}, limit, undefined, c);
+                return { entries: [...page.items].reverse(), ...position };
+              }
+              case 'events': {
+                // long-poll; `after` is the last sequence number this client has seen
+                const after = Number(arg.after ?? -1);
+                const epoch = typeof arg.epoch === 'string' ? arg.epoch : undefined;
+                return events.poll(sessionId, after, { epoch, waitMs: 25_000, signal: c?.abortSignal });
+              }
+              default:
+                throw new Error(`unknown member: ${call.member}`);
             }
-            case 'history': {
-              // entries() is newest-first; the UI needs chronological messages.
-              const limit = Math.min(Math.max(Number(arg.limit) || 200, 1), 500);
-              // position before the page: nothing is lost; repeats are deduped by entry id in the UI
-              const position = await events.position(sessionId);
-              const page = await conv.entries({}, limit, undefined, c);
-              return { entries: [...page.items].reverse(), ...position };
-            }
-            case 'events': {
-              // long-poll; `after` is the last sequence number this client has seen
-              const after = Number(arg.after ?? -1);
-              const epoch = typeof arg.epoch === 'string' ? arg.epoch : undefined;
-              return events.poll(sessionId, after, { epoch, waitMs: 25_000, signal: c?.abortSignal });
-            }
-            default:
-              throw new Error(`unknown member: ${call.member}`);
-          }
+          };
+          return ['prompt', 'abort', 'compact', 'configure'].includes(call.member)
+            ? withSessionMutation(sessionId, invoke) : invoke();
         },
         release() {},
       };
@@ -174,12 +193,14 @@ const host = {
             }
             case 'delete': {
               const id = String(call.args[0]);
-              const conv = await conversationOf(id);
-              // stop running work first; a hidden session must not keep using tools
-              await conv.abort(c);
-              // the transcript stays in SQLite; the registry entry is removed
-              await sessions.remove(id);
-              return { ok: true };
+              return withSessionMutation(id, async () => {
+                const conv = await conversationOf(id);
+                // No prompt/compact can start between abort and removal.
+                await conv.abort(c);
+                // Transcript stays in SQLite; every attached handler now rejects.
+                await sessions.remove(id);
+                return { ok: true };
+              });
             }
             case 'attach': {
               const id = String(call.args[0]);

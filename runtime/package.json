@@ -6,6 +6,9 @@
   "engines": {
     "node": ">=22.19.0"
   },
+  "scripts": {
+    "test": "node --test test-remote-provision.mjs test-remote-state.mjs test-remote-regressions.mjs"
+  },
   "dependencies": {
     "@earendil-works/chord": "^1.0.3",
     "@earendil-works/pi-ai": "^1.0.3",

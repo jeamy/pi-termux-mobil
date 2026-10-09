@@ -16,8 +16,9 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
 import { watchEvents } from '@earendil-works/pi-durable';
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import { RemoteExecutionEnv } from './remote-env.mjs';
-import { attachRemote, parseSshTarget, sshHostFingerprint } from './remote-client.mjs';
-import { copyAuthTo, ensureRemoteServer, probeRemote, remoteBash, runtimeHash, stopRemoteServer } from './remote-provision.mjs';
+import { parseSshTarget, sshHostFingerprint } from './remote-client.mjs';
+import { createRemoteState } from './remote-state.mjs';
+import { copyAuthTo, probeRemote, remoteBash, runtimeHash, stopRemoteServer } from './remote-provision.mjs';
 import {
   acquireOwnerLock, agentOf, createCredentialStore, createModelCatalog, ensureModel, isBusy,
   openHarness, pickModel, readJson, requestIdOf, sessionStore, Subagent, whenBusyOf,
@@ -295,73 +296,9 @@ function serveStatic(res, pathname) {
 // backoff and the last session is attached again. Prompts carry a requestId,
 // so a retried prompt is never answered twice.
 
-const remoteState = {
-  remote: null,
-  sessionId: null,
-  status: 'disconnected', // connected | reconnecting | disconnected
-  lastError: null,
-  log: [],
-  generation: 0,
-  async connect(target, { copyAuth = false, allowUpdate = false } = {}) {
-    await this.disconnect();
-    const generation = this.generation;
-    const prefix = process.env.PREFIX || '';
-    // make sure a pi-serverd runs there (installs + starts it in tmux if not)
-    this.log = [];
-    this.status = 'provisioning';
-    this.lastError = null;
-    try {
-      if (copyAuth) await assertTrusted(target);
-      await ensureRemoteServer({ ssh: target, prefix, copyAuth, allowUpdate, authFile: AUTH_PATH, log: (l) => { this.log.push(l); if (this.log.length > 200) this.log.shift(); } });
-    } catch (e) {
-      this.status = 'disconnected';
-      this.lastError = String(e?.message || e);
-      throw e;
-    }
-    if (generation !== this.generation) throw Object.assign(new Error('connection cancelled'), { status: 409 });
-    let remote;
-    try { remote = await attachRemote({ ssh: target, prefix, socketDir: path.join(STATE_DIR, 'tunnels') }); }
-    catch (e) { this.status = 'disconnected'; this.lastError = String(e?.message || e); throw e; }
-    if (generation !== this.generation) { await remote.disconnect(); throw Object.assign(new Error('connection cancelled'), { status: 409 }); }
-    this.remote = remote;
-    this.status = 'connected';
-    remote.onLost((why) => this.recover(remote, why));
-    return remote;
-  },
-  async recover(remote, why) {
-    if (this.remote !== remote || this.status === 'reconnecting') return;
-    this.status = 'reconnecting';
-    this.lastError = why;
-    console.error('remote lost:', why);
-    for (let attempt = 0; this.remote === remote; attempt++) {
-      await new Promise((r) => setTimeout(r, Math.min(30_000, 1000 * 2 ** attempt)));
-      if (this.remote !== remote) return;
-      try {
-        await remote.reconnect();
-        if (this.sessionId) await remote.attach(this.sessionId);
-        this.status = 'connected';
-        this.lastError = null;
-        console.log('remote reconnected');
-        return;
-      } catch (e) { this.lastError = String(e?.message || e); }
-    }
-  },
-  async disconnect() {
-    this.generation++;
-    const r = this.remote;
-    this.remote = null;
-    this.sessionId = null;
-    this.status = 'disconnected';
-    if (r) { try { await r.disconnect(); } catch {} }
-  },
-  require() {
-    if (!this.remote) throw Object.assign(new Error('not connected'), { status: 400 });
-    if (this.status !== 'connected') {
-      throw Object.assign(new Error(`reconnecting: ${this.lastError || ''}`), { status: 503, reconnecting: true });
-    }
-    return this.remote;
-  },
-};
+const remoteState = createRemoteState({
+  prefix: process.env.PREFIX || '', stateDir: STATE_DIR, authFile: AUTH_PATH, assertTrusted,
+});
 
 // --- client host registry + ssh key helpers ----------------------------------------------
 
@@ -611,7 +548,7 @@ async function handleApi(req, res, url, p) {
         return json(res, 200, await remote.request('configure', [{ model: { provider: str(body.provider), modelId: str(body.modelId) } }]));
       case 'POST /api/remote/create': return json(res, 200, await remote.create({ name: str(body.name, 100) || undefined }));
       case 'POST /api/remote/rename':
-        return json(res, 200, await remote.request('rename', [str(body.id), str(body.name, 100)]));
+        return json(res, 200, await remote.rename(str(body.id), str(body.name, 100)));
       case 'POST /api/remote/delete':
         if (str(body.id) === remoteState.sessionId) remoteState.sessionId = null;
         return json(res, 200, await remote.delete(str(body.id)));
